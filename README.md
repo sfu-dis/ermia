@@ -41,6 +41,7 @@ $run.sh \
        "[other benchmark-specific runtime options]"`
 ```
 *Note the quotation marks for additional options.*
+*Currently we support up to 64 threads, supporting more is in-progress.*
 
 #### System-wide runtime options
 
