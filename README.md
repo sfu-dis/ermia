@@ -2,7 +2,7 @@
 
 Fast and Robust OLTP using Epoch-based Resource Management and Indirection Array
 
-For more information, you may refer to our SIGMOD'16 paper (https://github.com/ermia-db/ermia/blob/master/ermia.pdf)
+For more information, you may refer to our SIGMOD'16 paper (https://github.com/ermia-db/ermia/raw/master/ermia.pdf)
 
 #### Environment configurations
 
