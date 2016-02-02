@@ -2,6 +2,8 @@
 
 Fast and Robust OLTP using Epoch-based Resource Management and Indirection Array
 
+For more information, you may refer to our SIGMOD'16 paper (https://github.com/ermia-db/ermia/blob/master/ermia.pdf)
+
 #### Environment configurations
 
 * Software dependencies: `libnuma` and `tcmalloc` (part of google perftools). Install from your favorite package manager.
