@@ -27,6 +27,10 @@ ERMIA supports Read Committed (RC), Snapshot Isolation (SI), Serializable Snapsh
 
 Giving `-D[SCHEME]` to `$make` also works. `SCHEME` can be `RC`, `SI`, `RC_SSN`, `SI_SSN`, or `SSI`.
 
+#### Adjust maximum concurrent workers
+
+By default we support up to 256 cores (for SSN/SSI only; SI/RC are not affected). The limit can be adjusted by setting `CAPACITY` defined under `readers_list::bitmap_t` in `dbcore/serial.h`. `CAPACITY` must be a multiple of 64.
+
 #### Build it
 --------
 
@@ -43,7 +47,6 @@ $run.sh \
        "[other benchmark-specific runtime options]"`
 ```
 *Note the quotation marks for additional options.*
-*Currently we support up to 64 threads, supporting more is in-progress.*
 
 #### System-wide runtime options
 
