@@ -130,8 +130,7 @@ ifneq ($(strip $(CUSTOM_LDPATH)), )
         LDFLAGS+=$(CUSTOM_LDPATH)
 endif
 
-SRCFILES = allocator.cc \
-	base_txn_btree.cc \
+SRCFILES = base_txn_btree.cc \
 	core.cc \
 	counter.cc \
 	memory.cc \
