@@ -18,10 +18,6 @@ using namespace TXN;
 transaction::transaction(uint64_t flags, str_arena &sa)
   : flags(flags), sa(&sa)
 {
-    epoch = MM::epoch_enter();
-#ifdef REUSE_OBJECTS
-    op = MM::get_object_pool();
-#endif
 #ifdef BTREE_LOCK_OWNERSHIP_CHECKING
     concurrent_btree::NodeLockRegionBegin();
 #endif
@@ -30,6 +26,7 @@ transaction::transaction(uint64_t flags, str_arena &sa)
 #endif
     xid = TXN::xid_alloc();
     xc = xid_get_context(xid);
+    xc->begin_epoch = MM::epoch_enter();
 #if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
     xc->xct = this;
     // If there's a safesnap, then SSN treats the snapshot as a transaction
@@ -84,9 +81,9 @@ transaction::~transaction()
         serial_deregister_tx(xid);
 #endif
     if (sysconf::enable_safesnap and flags & TXN_FLAG_READ_ONLY)
-        MM::epoch_exit(INVALID_LSN, epoch);
+        MM::epoch_exit(INVALID_LSN, xc->begin_epoch);
     else
-        MM::epoch_exit(xc->end, epoch);
+        MM::epoch_exit(xc->end, xc->begin_epoch);
     xid_free(xid);    // must do this after epoch_exit, which uses xc.end
 }
 
@@ -109,7 +106,7 @@ transaction::abort()
 #endif
 
     for (auto &w : write_set) {
-        dbtuple *tuple = w.new_object->tuple();
+        dbtuple *tuple = w.get_object()->tuple();
         ASSERT(tuple);
         ASSERT(XID::from_ptr(tuple->get_object()->_clsn) == xid);
         if (tuple->is_defunct())   // for repeated overwrites
@@ -120,11 +117,9 @@ transaction::abort()
             tuple->next()->welcome_readers();
         }
 #endif
+        volatile_write(w.get_object()->_clsn, NULL_PTR);
         oidmgr->oid_unlink(w.oa, w.oid, tuple);
-#if defined(REUSE_OBJECTS)
-        object *obj = (object *)((char *)tuple - sizeof(object));
-        op->put(xc->end.offset(), obj);
-#endif
+        MM::deallocate(w.new_object);
     }
 
     // Read-only tx on a safesnap won't have log
@@ -301,7 +296,7 @@ transaction::parallel_ssn_commit()
     }
 
     for (auto &w : write_set) {
-        dbtuple *tuple = w.new_object->tuple();
+        dbtuple *tuple = w.get_object()->tuple();
         if (tuple->is_defunct())    // repeated overwrites
             continue;
 
@@ -475,9 +470,6 @@ transaction::parallel_ssn_commit()
     if (is_read_mostly())
         serial_stamp_last_committed_lsn(xc->end);
 
-    recycle_oid *updated_oids_head = NULL;
-    recycle_oid *updated_oids_tail = NULL;
-
     uint64_t my_sstamp = 0;
     if (is_read_mostly()) {
         my_sstamp = xc->sstamp.load(std::memory_order_acquire);
@@ -489,7 +481,7 @@ transaction::parallel_ssn_commit()
     // post-commit: stuff access stamps for reads; init new versions
     auto clsn = xc->end;
     for (auto &w : write_set) {
-        dbtuple *tuple = w.new_object->tuple();
+        dbtuple *tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
             continue;
         tuple->do_write();
@@ -509,13 +501,7 @@ transaction::parallel_ssn_commit()
         ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one CAS per tx
-            recycle_oid *r = new recycle_oid(w.oa, w.oid);
-            if (not updated_oids_head)
-                updated_oids_head = updated_oids_tail = r;
-            else {
-                updated_oids_tail->next = r;
-                updated_oids_tail = r;
-            }
+            enqueue_recycle_oids(w);
         }
     }
 
@@ -569,9 +555,9 @@ transaction::parallel_ssn_commit()
         serial_deregister_reader_tx(&r->readers_bitmap);
     }
 
-    if (updated_oids_head) {
+    if (updated_oids_head != NULL_PTR) {
         ASSERT(sysconf::enable_gc);
-        ASSERT(updated_oids_tail);
+        ASSERT(updated_oids_tail != NULL_PTR);
         MM::recycle(updated_oids_head, updated_oids_tail);
     }
 
@@ -694,9 +680,9 @@ transaction::parallel_ssi_commit()
     if (ct3) {
         // now see if I'm the unlucky T2
         for (auto &w : write_set) {
-            if (w.new_object->tuple()->is_defunct())
+            if (w.get_object()->tuple()->is_defunct())
                 continue;
-            dbtuple *overwritten_tuple = w.new_object->tuple()->next();
+            dbtuple *overwritten_tuple = w.get_object()->tuple()->next();
             if (not overwritten_tuple)
                 continue;
             // Note: the bits representing readers that will commit **after**
@@ -787,13 +773,10 @@ transaction::parallel_ssi_commit()
     // survived!
     log->commit(NULL);
 
-    recycle_oid *updated_oids_head = NULL;
-    recycle_oid *updated_oids_tail = NULL;
-
     // stamp overwritten versions, stuff clsn
     auto clsn = xc->end;
     for (auto &w : write_set) {
-        dbtuple* tuple = w.new_object->tuple();
+        dbtuple* tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
             continue;
         tuple->do_write();
@@ -811,13 +794,7 @@ transaction::parallel_ssi_commit()
         INVARIANT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one XCHG per tx
-            recycle_oid *r = new recycle_oid(w.oa, w.oid);
-            if (not updated_oids_head)
-                updated_oids_head = updated_oids_tail = r;
-            else {
-                updated_oids_tail->next = r;
-                updated_oids_tail = r;
-            }
+            enqueue_recycle_oids(w);
         }
     }
 
@@ -873,9 +850,9 @@ transaction::parallel_ssi_commit()
     }
 
     // GC stuff, do it out of precommit
-    if (updated_oids_head) {
+    if (updated_oids_head != NULL_PTR) {
         ASSERT(sysconf::enable_gc);
-        ASSERT(updated_oids_tail);
+        ASSERT(updated_oids_tail != NULL_PTR);
         MM::recycle(updated_oids_head, updated_oids_tail);
     }
 
@@ -901,11 +878,9 @@ transaction::si_commit()
     // post-commit cleanup: install clsn to tuples
     // (traverse write-tuple)
     // stuff clsn in tuples in write-set
-    recycle_oid *updated_oids_head = NULL;
-    recycle_oid *updated_oids_tail = NULL;
     auto clsn = xc->end;
     for (auto &w : write_set) {
-        dbtuple* tuple = w.new_object->tuple();
+        dbtuple* tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
             continue;
         ASSERT(w.oa);
@@ -914,13 +889,7 @@ transaction::si_commit()
         INVARIANT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one XCHG per tx
-            recycle_oid *r = new recycle_oid(w.oa, w.oid);
-            if (not updated_oids_head)
-                updated_oids_head = updated_oids_tail = r;
-            else {
-                updated_oids_tail->next = r;
-                updated_oids_tail = r;
-            }
+            enqueue_recycle_oids(w);
         }
 #if CHECK_INVARIANT
         object *obj = tuple->get_object();
@@ -935,9 +904,9 @@ transaction::si_commit()
     // This is where (committed) tuple data are made visible to readers
     volatile_write(xc->state, TXN_CMMTD);
 
-    if (updated_oids_head) {
+    if (updated_oids_head != NULL_PTR) {
         ASSERT(sysconf::enable_gc);
-        ASSERT(updated_oids_tail);
+        ASSERT(updated_oids_tail != NULL_PTR);
         MM::recycle(updated_oids_head, updated_oids_tail);
     }
 
@@ -970,12 +939,12 @@ transaction::try_insert_new_tuple(
     FID fid)
 {
     INVARIANT(key);
-    object *object = object::create_tuple_object(value, false);
-    dbtuple *tuple = object->tuple();
+    fat_ptr new_head = object::create_tuple_object(value, false, xc->begin_epoch);
+    ASSERT(new_head.size_code() != INVALID_SIZE_CODE);
+    dbtuple *tuple = ((object *)new_head.offset())->tuple();
+    ASSERT(decode_size_aligned(new_head.size_code()) >= tuple->size);
     tuple->get_object()->_clsn = xid.to_ptr();
-
     OID oid = oidmgr->alloc_oid(fid);
-    fat_ptr new_head = fat_ptr::make(object, INVALID_SIZE_CODE, 0);
     oidmgr->oid_put_new(btr->tuple_vec(), oid, new_head);
     typename concurrent_btree::insert_info_t ins_info;
     if (unlikely(!btr->insert_if_absent(varkey(key), oid, tuple, &ins_info))) {
@@ -1025,7 +994,8 @@ transaction::try_insert_new_tuple(
                           DEFAULT_ALIGNMENT_BITS, NULL);
 
     // update write_set
-    write_set.emplace_back(tuple->get_object(), btr->tuple_vec(), oid);
+    ASSERT(tuple->pvalue->size() == tuple->size);
+    write_set.emplace_back(new_head, btr->tuple_vec(), oid);
     return true;
 }
 

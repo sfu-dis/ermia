@@ -4,6 +4,7 @@
 #include "../benchmarks/ndb_wrapper.h"
 #include "../txn_btree.h"
 #include <cstring>
+#include <future>
 
 using namespace RCU;
 
@@ -298,14 +299,14 @@ sm_log::recover_prepare_version(sm_log_scan_mgr::record_scan *logrec,
     obj = t.op->get(sz);
     if (not obj)
 #endif
-        obj = new (MM::allocate(sz)) object(logrec->payload_ptr(), next);
+        obj = new (MM::allocate(sz, 0)) object(logrec->payload_ptr(), next, 0);
 
     if (warm_up != WU_EAGER)
         return fat_ptr::make(obj, INVALID_SIZE_CODE, fat_ptr::ASI_LOG_FLAG);
 
     // Load tuple varstr from logrec
     dbtuple* tuple = (dbtuple *)obj->payload();
-    tuple = dbtuple::init((char*)tuple, sz);
+    new (tuple) dbtuple(sz);
     logrec->load_object((char *)tuple->get_value_start(), sz);
 
     // Strip out the varstr stuff

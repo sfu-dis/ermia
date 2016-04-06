@@ -220,6 +220,7 @@ btree<P>::search_impl(const key_type &k, value_type &v,
                       versioned_node_t *search_info) const
 {
   INVARIANT(RCU::rcu_is_active());
+  //ANON_REGION("btree<P>::search_impl:", &btree_search_impl_perf_cg);
   INVARIANT(leaf_nodes.empty());
 
 retry:

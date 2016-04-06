@@ -24,8 +24,6 @@
 #include "small_vector.h"
 #include "ownership_checker.h"
 
-#include "rcu-wrapper.h"
-
 #include "masstree/masstree_scan.hh"
 #include "masstree/masstree_insert.hh"
 #include "masstree/masstree_remove.hh"
@@ -128,16 +126,20 @@ class simple_threadinfo {
 
     // memory allocation
     void* allocate(size_t sz, memtag) {
-        return MM::allocate(sz);
+      // FIXME(tzwang): broken for now
+        return MM::allocate(sz, 0);
     }
     void deallocate(void* p, size_t sz, memtag) {
+      // FIXME(tzwang): broken for now
     }
     void deallocate_rcu(void *p, size_t sz, memtag) {
+      // FIXME(tzwang): broken for now
     }
 
     void* pool_allocate(size_t sz, memtag) {
 	int nl = (sz + CACHE_LINE_SIZE - 1) / CACHE_LINE_SIZE;
-        return MM::allocate(nl * CACHE_LINE_SIZE);
+      // FIXME(tzwang): broken for now
+        return MM::allocate(nl * CACHE_LINE_SIZE, 0);
     }
     void pool_deallocate(void* p, size_t sz, memtag) {
     }
