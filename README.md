@@ -6,7 +6,13 @@ For more information, you may refer to our SIGMOD'16 paper (https://github.com/e
 
 #### Environment configurations
 
-* Software dependencies: `libnuma`. Install from your favorite package manager.
+* Software dependencies: `libnuma`. Install from your favorite package manager. ERMIA uses `mmap` with `MAP_HUGETLB` to allocate huge pages. `MAP_HUGETLB` is available after Linux 2.6.32.
+* Make sure you have enough huge pages. Almost all memory allocations come from the space carved out here. Assuming 2MB pages, the command below will allocate 40GB of memory:
+```
+sudo sh -c 'echo [x pages] > /proc/sys/vm/nr_hugepages'
+```
+This limits the maximum for --node-memory-gb to 10 for a 4-socket machine (see below).
+
 * `mlock` limits. Add the following to `/etc/security/limits.conf` (replace "[user]" with your login):
 ```
 [user] soft memlock unlimited
