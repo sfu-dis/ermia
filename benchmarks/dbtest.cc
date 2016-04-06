@@ -13,7 +13,6 @@
 
 #include "../dbcore/sm-config.h"
 #include "../dbcore/sm-alloc.h"
-#include "../stats_server.h"
 #include "bench.h"
 #include "ndb_wrapper.h"
 //#include "kvdb_wrapper.h"
@@ -91,8 +90,6 @@ main(int argc, char **argv)
       {"log-buffer-mb"              , required_argument , 0                          , 'u'} ,
       {"warm-up"                    , required_argument , 0                          , 'w'} ,
       {"enable-chkpt"               , no_argument       , &enable_chkpt              , 1} ,
-      {"stats-server-sockfile"      , required_argument , 0                          , 'x'} ,
-      {"no-reset-counters"          , no_argument       , &no_reset_counters         , 1}   ,
       {"null-log-device"            , no_argument       , &sysconf::null_log_device  , 1} ,
       {"prefault-gig"               , required_argument , 0                          , 'p'},
       {"enable-gc"                  , no_argument       , &sysconf::enable_gc        , 1},
@@ -200,10 +197,6 @@ main(int argc, char **argv)
       ALWAYS_ASSERT(sysconf::log_buffer_mb);
       break;
 
-    case 'x':
-      stats_server_sockfile = optarg;
-      break;
-
     case '?':
       /* getopt_long already printed an error message. */
       exit(1);
@@ -226,12 +219,6 @@ main(int argc, char **argv)
     cerr << "[ERROR] no log dir specified" << endl;
     return 1;
   }
-
-#ifndef ENABLE_EVENT_COUNTERS
-  if (!stats_server_sockfile.empty()) {
-    cerr << "[WARNING] --stats-server-sockfile with no event counters enabled is useless" << endl;
-  }
-#endif
 
 #ifdef DEBUG
   cerr << "WARNING: benchmark built in DEBUG mode!!!" << endl;
@@ -309,7 +296,6 @@ main(int argc, char **argv)
     cerr << "  enable-chkpt    : " << enable_chkpt           << endl;
     cerr << "  enable-gc       : " << sysconf::enable_gc     << endl;
     cerr << "  null-log-device : " << sysconf::null_log_device << endl;
-    cerr << "  stats-server-sockfile: " << stats_server_sockfile << endl;
 
     cerr << "system properties:" << endl;
     cerr << "  btree_internal_node_size: " << concurrent_btree::InternalNodeSize() << endl;
@@ -335,11 +321,6 @@ main(int argc, char **argv)
 #ifdef USE_PARALLEL_SSN
     cerr << "  SSN read optimization threshold: 0x" << hex << sysconf::ssn_read_opt_threshold << dec << endl;
 #endif
-  }
-
-  if (!stats_server_sockfile.empty()) {
-    stats_server *srvr = new stats_server(stats_server_sockfile);
-    thread(&stats_server::serve_forever, srvr).detach();
   }
 
   heap_prefault();

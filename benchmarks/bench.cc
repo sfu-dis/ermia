@@ -12,8 +12,6 @@
 
 #include "bench.h"
 
-#include "../counter.h"
-#include "../scopedperf.hh"
 #include "../dbcore/rcu.h"
 #include "../dbcore/sm-config.h"
 #include "../dbcore/sm-log.h"
@@ -43,7 +41,6 @@ int enable_parallel_loading = false;
 int pin_cpus = 0;
 int slow_exit = 0;
 int retry_aborted_transaction = 0;
-int no_reset_counters = 0;
 int backoff_aborted_transaction = 0;
 int enable_chkpt = 0;
 
@@ -105,8 +102,6 @@ write_cb(void *p, const char *s)
 	ofs.close();
 }
 
-static event_avg_counter evt_avg_abort_spins("avg_abort_spins");
-
 void
 bench_worker::run()
 {
@@ -161,7 +156,6 @@ retry:
 								backoff_shifts++;
 							uint64_t spins = 1UL << backoff_shifts;
 							spins *= 100; // XXX: tuned pretty arbitrarily
-							evt_avg_abort_spins.offer(spins);
 							while (spins) {
 								nop_pause();
 								spins--;
@@ -216,11 +210,6 @@ bench_runner::run()
       cerr << "DB size: " << delta_mb << " MB" << endl;
 
     delete_pointers(loaders);
-  }
-
-  if (!no_reset_counters) {
-    event_counter::reset_all_counters(); // XXX: for now - we really should have a before/after loading
-    PERF_EXPR(scopedperf::perfsum_base::resetall());
   }
 
   map<string, size_t> table_sizes_before;
@@ -355,7 +344,6 @@ bench_runner::run()
     for (size_t i = 1; i < workers.size(); i++)
       size_delta += workers[i]->get_size_delta();
     const double size_delta_mb = double(size_delta)/1048576.0;
-    map<string, counter_data> ctrs = event_counter::get_all_counters();
 
     cerr << "--- table statistics ---" << endl;
     for (map<string, abstract_ordered_index *>::iterator it = open_tables.begin();
@@ -368,18 +356,6 @@ bench_runner::run()
       else
         cerr << " (+" << delta << " records)" << endl;
     }
-#ifdef ENABLE_BENCH_TXN_COUNTERS
-    cerr << "--- txn counter statistics ---" << endl;
-    {
-      // take from thread 0 for now
-      abstract_db::txn_counter_map agg = workers[0]->get_local_txn_counters();
-      for (auto &p : agg) {
-        cerr << p.first << ":" << endl;
-        for (auto &q : p.second)
-          cerr << "  " << q.first << " : " << q.second << endl;
-      }
-    }
-#endif
     cerr << "--- benchmark statistics ---" << endl;
     cerr << "runtime: " << elapsed_sec << " sec" << endl;
     cerr << "memory delta: " << delta_mb  << " MB" << endl;
@@ -394,12 +370,6 @@ bench_runner::run()
     cerr << "agg_abort_rate: " << agg_abort_rate << " aborts/sec" << endl;
     cerr << "avg_per_core_abort_rate: " << avg_per_core_abort_rate << " aborts/sec/core" << endl;
     cerr << "txn breakdown: " << format_list(agg_txn_counts.begin(), agg_txn_counts.end()) << endl;
-    cerr << "--- system counters (for benchmark) ---" << endl;
-    for (map<string, counter_data>::iterator it = ctrs.begin();
-         it != ctrs.end(); ++it)
-      cerr << it->first << ": " << it->second << endl;
-    cerr << "--- perf counters (if enabled, for benchmark) ---" << endl;
-    PERF_EXPR(scopedperf::perfsum_base::printall());
 
 #if 0
 	RCU::rcu_gc_info gc_info = RCU::rcu_get_gc_info();
@@ -497,15 +467,6 @@ struct map_maxer {
       agg[it->first] = std::max(agg[it->first], it->second);
   }
 };
-
-#ifdef ENABLE_BENCH_TXN_COUNTERS
-void
-bench_worker::measure_txn_counters(void *txn, const char *txn_name)
-{
-  auto ret = db->get_txn_counters(txn);
-  map_maxer<string, uint64_t>()(local_txn_counters[txn_name], ret);
-}
-#endif
 
 const tx_stat_map
 bench_worker::get_txn_counts() const
