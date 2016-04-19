@@ -72,6 +72,7 @@ struct sm_log_alloc_mgr {
 
     void _log_write_daemon();
     void _kick_log_write_daemon();
+    uint64_t latest_durable_lsn_offset();
 
     sm_log_recover_mgr _lm;
     window_buffer _logbuf;

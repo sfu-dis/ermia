@@ -153,7 +153,10 @@ LSN
 sm_log_alloc_mgr::flush_cur_lsn()
 {
     for (uint32_t i = 0; i < sysconf::_active_threads; ++i) {
-        volatile_write(_tls_lsn_offset[i], cur_lsn_offset());
+        // need std::max() because retired threads (eg loaders) will
+        // write 0xFFFFFFFFFFFFFFFF to their slots upon finishing the task.
+        volatile_write(_tls_lsn_offset[i],
+                       std::max(cur_lsn_offset(), _tls_lsn_offset[i]));
     }
     return flush();
 }
@@ -368,7 +371,22 @@ sm_log_alloc_mgr::discard(log_allocation *x)
     b->checksum = b->full_checksum();
     release(x);
 }
-    
+
+uint64_t
+sm_log_alloc_mgr::latest_durable_lsn_offset()
+{
+    uint64_t oldest_offset = cur_lsn_offset();
+    // FIXME(tzwang): don't care if it's loading, but might need a way
+    // to deal with stragglers due to unbalanced workload.
+    if (sysconf::loading) {
+        return oldest_offset;
+    }
+    for (uint32_t i = 0; i < sysconf::_active_threads; i++) {
+        oldest_offset = std::min(_tls_lsn_offset[i], oldest_offset);
+    }
+    return oldest_offset;
+}
+
 /* This guy's only job is to write released log blocks to disk. In
    steady state, new log blocks will be released during each log
    write, keeping the daemon busy most of the time. Whenever the log
@@ -421,19 +439,13 @@ sm_log_alloc_mgr::_log_write_daemon()
         /* Write out all available data in the largest chunks
            possible. Do not span segments.
         */
-        uint64_t oldest_offset = cur_offset;
-        for (uint32_t i = 0; i < sysconf::_active_threads; i++) {
-            // Skip too small/stale LSNs (maybe due to running read-only
-            // transactions using SSN's safesnap) so that we can make progress.
-            if (_tls_lsn_offset[i] > _durable_lsn_offset)
-                oldest_offset = std::min(_tls_lsn_offset[i], oldest_offset);
-        }
-        while (_durable_lsn_offset < oldest_offset) {
+        auto new_dlsn_offset = latest_durable_lsn_offset();
+        while (_durable_lsn_offset < new_dlsn_offset) {
             sm_log_recover_mgr::segment_id *new_sid;
             uint64_t new_offset;
             uint64_t new_byte;
             
-            if (durable_sid->end_offset < oldest_offset+MIN_LOG_BLOCK_SIZE) {
+            if (durable_sid->end_offset < new_dlsn_offset+MIN_LOG_BLOCK_SIZE) {
                 /* Watch out for segment boundaries!
 
                    The true end of a segment is somewhere in the last
@@ -450,8 +462,8 @@ sm_log_alloc_mgr::_log_write_daemon()
             }
             else {
                 new_sid = durable_sid;
-                new_offset = oldest_offset;
-                new_byte = new_sid->buf_offset(oldest_offset);
+                new_offset = new_dlsn_offset;
+                new_byte = new_sid->buf_offset(new_dlsn_offset);
             }
 
             ASSERT(durable_byte == _logbuf.read_begin());
@@ -529,7 +541,7 @@ sm_log_alloc_mgr::_log_write_daemon()
 
         // time to quit? (only if everything in the log reached disk)
         if (_write_daemon_should_stop and cur_offset == _durable_lsn_offset) {
-            if (oldest_offset == cur_offset)
+            if (new_dlsn_offset == cur_offset)
                 return;
         }
 
