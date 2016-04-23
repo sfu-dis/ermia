@@ -356,16 +356,6 @@ bench_runner::run()
 	cerr << "bytes_stashed: " << gc_info.bytes_stashed << endl;
     cerr << "---------------------------------------" << endl;
 #endif
-
-#ifdef USE_JEMALLOC
-    cerr << "dumping heap profile..." << endl;
-    mallctl("prof.dump", NULL, NULL, NULL, 0);
-    cerr << "printing jemalloc stats..." << endl;
-    malloc_stats_print(write_cb, NULL, "");
-#endif
-#ifdef XX_USE_TCMALLOC
-    HeapProfilerDump("before-exit");
-#endif
   }
 
   /*
