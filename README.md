@@ -69,7 +69,7 @@ $run.sh \
 `--warm-up`: strategy to load versions upon recovery. Candidates are:
 - `eager`: load all latest versions during recovery, so the database is fully in-memory when it starts to process new transactions;
 - `lazy`: start a thread to load versions in the background after recovery, so the database is partially in-memory when it starts to process new transactions.
-- `none`: load versions on-demand upon access (anti-caching).
+- `none`: load versions on-demand upon access.
 
 *SSI and SSN specific:*
 
