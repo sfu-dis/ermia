@@ -90,7 +90,6 @@ public:
     ALWAYS_ASSERT(b);
     b->count_down();
     b->wait_for();
-    scoped_db_thread_ctx ctx(db, true);
     load();
     MM::deregister_thread();
 	RCU::rcu_deregister();

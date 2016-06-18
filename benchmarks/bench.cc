@@ -82,7 +82,6 @@ bench_worker::run()
     MM::register_thread();
 	RCU::rcu_start_tls_cache( 32, 100000 );
 	on_run_setup();
-	scoped_db_thread_ctx ctx(db, false);
 	const workload_desc_vec workload = get_workload();
 	txn_counts.resize(workload.size());
 	barrier_a->count_down();
