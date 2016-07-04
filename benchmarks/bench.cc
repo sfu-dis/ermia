@@ -61,15 +61,6 @@ map_agg(map<K, V> &agg, const map<K, V> &m)
 		agg[it->first] += it->second;
 }
 
-// returns <free_bytes, total_bytes>
-	static pair<uint64_t, uint64_t>
-get_system_memory_info()
-{
-	struct sysinfo inf;
-	sysinfo(&inf);
-	return make_pair(inf.mem_unit * inf.freeram, inf.mem_unit * inf.totalram);
-}
-
 void
 bench_worker::run()
 {
@@ -156,7 +147,6 @@ bench_runner::run()
   if (not sm_log::need_recovery) {
     const vector<bench_loader *> loaders = make_loaders();
     spin_barrier b(loaders.size());
-    const pair<uint64_t, uint64_t> mem_info_before = get_system_memory_info();
     {
       scoped_timer t("dataloading", verbose);
       for (vector<bench_loader *>::const_iterator it = loaders.begin();
@@ -174,19 +164,10 @@ bench_runner::run()
     ALWAYS_ASSERT(MM::safesnap_lsn.offset());
     RCU::rcu_exit();
     RCU::rcu_deregister();
-
-    const pair<uint64_t, uint64_t> mem_info_after = get_system_memory_info();
-    const int64_t delta = int64_t(mem_info_before.first) - int64_t(mem_info_after.first); // free mem
-    const double delta_mb = double(delta)/1048576.0;
-    if (verbose)
-      cerr << "DB size: " << delta_mb << " MB" << endl;
-
     delete_pointers(loaders);
   }
 
   map<string, size_t> table_sizes_before;
-
-  const pair<uint64_t, uint64_t> mem_info_before = get_system_memory_info();
 
   // Start checkpointer after database is ready
   if (enable_chkpt) {
@@ -311,14 +292,6 @@ bench_runner::run()
       delete chkptmgr;
 
   if (verbose) {
-    const pair<uint64_t, uint64_t> mem_info_after = get_system_memory_info();
-    const int64_t delta = int64_t(mem_info_before.first) - int64_t(mem_info_after.first); // free mem
-    const double delta_mb = double(delta)/1048576.0;
-    ssize_t size_delta = workers[0]->get_size_delta();
-    for (size_t i = 1; i < workers.size(); i++)
-      size_delta += workers[i]->get_size_delta();
-    const double size_delta_mb = double(size_delta)/1048576.0;
-
     cerr << "--- table statistics ---" << endl;
     for (map<string, abstract_ordered_index *>::iterator it = open_tables.begin();
          it != open_tables.end(); ++it) {
@@ -332,10 +305,6 @@ bench_runner::run()
     }
     cerr << "--- benchmark statistics ---" << endl;
     cerr << "runtime: " << elapsed_sec << " sec" << endl;
-    cerr << "memory delta: " << delta_mb  << " MB" << endl;
-    cerr << "memory delta rate: " << (delta_mb / elapsed_sec)  << " MB/sec" << endl;
-    cerr << "logical memory delta: " << size_delta_mb << " MB" << endl;
-    cerr << "logical memory delta rate: " << (size_delta_mb / elapsed_sec) << " MB/sec" << endl;
     cerr << "agg_nosync_throughput: " << agg_nosync_throughput << " ops/sec" << endl;
     cerr << "avg_nosync_per_core_throughput: " << avg_nosync_per_core_throughput << " ops/sec/core" << endl;
     cerr << "agg_throughput: " << agg_throughput << " ops/sec" << endl;
