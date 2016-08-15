@@ -26,7 +26,7 @@ runtime=$5
 
 if [ "$bench" == "tpce" ]; then
   sf="500"
-elif [ "$bench" != "ycsb" ]; then
+elif [[ "$bench" != "ycsb" && "$bench" != "tpcc" ]]; then
   echo "Unsupported benchmark $bench."
 fi
 
