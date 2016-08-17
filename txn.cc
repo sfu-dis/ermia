@@ -54,7 +54,7 @@ transaction::transaction(uint64_t flags, str_arena &sa)
         serial_register_tx(xid);
         RCU::rcu_enter();
         log = logmgr->new_tx_log();
-        xc->begin = logmgr->cur_lsn();
+        xc->begin = LSN::make(logmgr->cur_lsn().offset() + 1, 0);
 #ifdef USE_PARALLEL_SSN
         xc->pstamp = volatile_read(MM::safesnap_lsn).offset();
 #elif defined(USE_PARALLEL_SSI)
@@ -64,7 +64,7 @@ transaction::transaction(uint64_t flags, str_arena &sa)
 #else
     RCU::rcu_enter();
     log = logmgr->new_tx_log();
-    xc->begin = logmgr->cur_lsn();
+    xc->begin = LSN::make(logmgr->cur_lsn().offset() + 1, 0);
 #endif
 }
 
