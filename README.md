@@ -47,6 +47,7 @@ Use `src/build.sh` to compile ERMIA. For performance runs, `$ build.sh`, `$ buil
 $run.sh \
        [executable] \
        [benchmark] \
+       [scale-factor] \
        [num-threads] \
        [duration (seconds)] \
        "[other system-wide runtime options]" \

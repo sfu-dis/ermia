@@ -10,15 +10,6 @@ CXX=g++
 DEBUG ?= 0
 NDEBUG ?= 0
 
-MYSQL ?= 1
-MYSQL_SHARE_DIR ?= /x/stephentu/mysql-5.5.29/build/sql/share
-
-# Available modes
-#   * perf
-#   * backoff
-#   * sandbox
-MODE ?= perf
-
 # run with 'MASSTREE=0' to turn off masstree
 MASSTREE ?= 1
 
@@ -26,7 +17,6 @@ MASSTREE ?= 1
 
 DEBUG_S=$(strip $(DEBUG))
 NDEBUG_S=$(strip $(NDEBUG))
-MODE_S=$(strip $(MODE))
 MASSTREE_S=$(strip $(MASSTREE))
 MASSTREE_CONFIG:=--enable-max-key-len=1024
 MASSTREE_LDFLAGS:=
@@ -49,21 +39,10 @@ else
 endif
 OSUFFIX=$(OSUFFIX_D)$(OSUFFIX_S)$(OSUFFIX_E)
 
-ifeq ($(MODE_S),perf)
-	O := out-perf$(OSUFFIX)
-	CONFIG_H = config/config-perf.h
-else ifeq ($(MODE_S),backoff)
-	O := out-backoff$(OSUFFIX)
-	CONFIG_H = config/config-backoff.h
-else ifeq ($(MODE_S),sandbox)
-	O := out-sandbox$(OSUFFIX)
-	CONFIG_H = config/config-sandbox.h
-else
-	$(error invalid mode)
-endif
+O := out-perf$(OSUFFIX)
 
 CXXFLAGS := -Wall -std=c++0x
-CXXFLAGS += -MD -Ithird-party/sparsehash/src -DCONFIG_H=\"$(CONFIG_H)\"
+CXXFLAGS += -MD -Ithird-party/sparsehash/src
 
 ifeq ($(SSI_S),1)
 	CXXFLAGS += -DSSI
@@ -199,14 +178,6 @@ EGEN_SRCFILES = \
    benchmarks/egen/progressmeterinterface.cpp \
    benchmarks/egen/bucketsimulator.cpp
 
-ifeq ($(MYSQL_S),1)
-BENCH_CXXFLAGS += -DMYSQL_SHARE_DIR=\"$(MYSQL_SHARE_DIR)\"
-BENCH_LDFLAGS := -L/usr/lib/mysql -lmysqld $(BENCH_LDFLAGS)
-BENCH_SRCFILES += benchmarks/mysql_wrapper.cc
-else
-BENCH_CXXFLAGS += -DNO_MYSQL
-endif
-
 BENCH_OBJFILES := $(patsubst %.cc, $(O)/%.o, $(BENCH_SRCFILES))
 EGEN_OBJFILES := $(patsubst %.cpp, $(O)/%.o, $(EGEN_SRCFILES))
 
@@ -288,10 +259,6 @@ endif
 
 ifeq ($(MASSTREE_S),1)
 #UPDATE_MASSTREE := $(shell cd ./`git rev-parse --show-cdup` && cur=`git submodule status --cached masstree | head -c 41 | tail -c +2` && if test -z `cd masstree; git rev-list -n1 $$cur^..HEAD 2>/dev/null`; then (echo Updating masstree... 1>&2; cd masstree; git checkout -f master >/dev/null; git pull; cd ..; git submodule update masstree); fi)
-endif
-
-ifneq ($(strip $(MYSQL_S)),$(strip $(DEP_BENCH_CONFIG)))
-DEP_BENCH_CONFIG := $(shell mkdir -p $(O); echo >$(O)/buildstamp.bench; echo "DEP_BENCH_CONFIG:=$(MYSQL_S)" >$(O)/_bench_config.d)
 endif
 
 ifneq ($(strip $(MASSTREE_CONFIG)),$(strip $(DEP_MASSTREE_CONFIG)))
