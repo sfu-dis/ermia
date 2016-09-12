@@ -8,7 +8,7 @@ CXX=g++
 #CXX=g++491
 
 DEBUG ?= 0
-CHECK_INVARIANTS ?= 0
+NDEBUG ?= 0
 
 MYSQL ?= 1
 MYSQL_SHARE_DIR ?= /x/stephentu/mysql-5.5.29/build/sql/share
@@ -25,7 +25,7 @@ MASSTREE ?= 1
 ###############
 
 DEBUG_S=$(strip $(DEBUG))
-CHECK_INVARIANTS_S=$(strip $(CHECK_INVARIANTS))
+NDEBUG_S=$(strip $(NDEBUG))
 MODE_S=$(strip $(MODE))
 MASSTREE_S=$(strip $(MASSTREE))
 MASSTREE_CONFIG:=--enable-max-key-len=1024
@@ -41,7 +41,7 @@ ifeq ($(DEBUG_S),1)
 else
 	MASSTREE_CONFIG+=--disable-assertions
 endif
-ifeq ($(CHECK_INVARIANTS_S),1)
+ifeq ($(NDEBUG_S),1)
 	OSUFFIX_S=.check
 	MASSTREE_CONFIG+=--enable-invariants --enable-preconditions
 else
@@ -68,7 +68,7 @@ CXXFLAGS += -MD -Ithird-party/sparsehash/src -DCONFIG_H=\"$(CONFIG_H)\"
 ifeq ($(SSI_S),1)
 	CXXFLAGS += -DSSI
 else ifeq ($(RC_SSN_S),1)
-	CXXFLAGS += -DSSN -DUSE_READ_COMMITTED -DEARLY_SSN_CHECK
+	CXXFLAGS += -DSSN -DRC -DEARLY_SSN_CHECK
 else ifeq ($(SI_SSN_S),1)
 	CXXFLAGS += -DSSN -DEARLY_SSN_CHECK
 endif
@@ -78,11 +78,11 @@ ifeq ($(DEBUG_S),1)
 else
         CXXFLAGS += -march=native -O2 -funroll-loops -fno-omit-frame-pointer
 endif
-ifeq ($(CHECK_INVARIANTS_S),1)
-	CXXFLAGS += -DCHECK_INVARIANTS
+ifeq ($(NDEBUG_S),1)
+	CXXFLAGS += -DNDEBUG
 endif
 ifeq ($(MASSTREE_S),1)
-	CXXFLAGS += -DNDB_MASSTREE -include masstree/config.h
+	CXXFLAGS += -DMASSTREE -include masstree/config.h
 	OBJDEP += masstree/config.h
 	O := $(O).masstree
 else

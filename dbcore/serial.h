@@ -13,7 +13,7 @@ void deassign_reader_bitmap_entry();
 // returns true if serializable, false means exclusion window violation
 inline bool ssn_check_exclusion(xid_context *xc) {
     uint64_t ss = xc->sstamp.load(std::memory_order_acquire) & (~xid_context::sstamp_final_mark);
-#if CHECK_INVARIANTS
+#ifndef NDEBUG
     if (ss and xc->pstamp >= ss) printf("ssn exclusion failure\n");
 #endif
     if (ss and xc->pstamp >= ss) {

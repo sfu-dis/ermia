@@ -189,7 +189,7 @@ void
 btree<P>::recursive_delete(node *n)
 {
   if (leaf_node *leaf = AsLeafCheck(n)) {
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     leaf->lock();
     leaf->mark_deleting();
     leaf->unlock();
@@ -204,7 +204,7 @@ btree<P>::recursive_delete(node *n)
     size_t n = internal->key_slots_used();
     for (size_t i = 0; i < n + 1; i++)
       recursive_delete(internal->children_[i]);
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     internal->lock();
     internal->mark_deleting();
     internal->unlock();
@@ -532,14 +532,14 @@ btree<P>::search_range_call(const key_type &lower,
       layer_upper = upper->shift_many(leaf_nodes.size());
       layer_has_upper = true;
     }
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     string_type prefix_before(prefix);
 #endif
     if (!search_range_at_layer(
           cur, prefix, lower.shift_many(leaf_nodes.size()),
           first, layer_has_upper ? &layer_upper : NULL, callback))
       return;
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     ASSERT(prefix == prefix_before);
 #endif
     first = false;
@@ -763,7 +763,7 @@ btree<P>::FindRespLeafLowerBound(
     } else if (leaf->keys_[i] == kslice) {
       const size_t kslicelen0 = leaf->keyslice_length(i);
       if (kslicelen0 <= kslicelen) {
-        // ASSERT doesn't hold, b/c values can be changing
+        // invariant doesn't hold, b/c values can be changing
         // concurrently (leaf is not assumed to be locked)
         //ASSERT(idxmatch == -1);
         idxlowerbound = i;
@@ -891,11 +891,11 @@ retry_cur_leaf:
           ASSERT(subroot->is_root());
 
           internal_node *new_root = internal_node::alloc();
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
           new_root->lock();
           new_root->mark_modifying();
           locked_nodes.push_back(new_root);
-#endif /* CHECK_INVARIANTS */
+#endif
           new_root->children_[0] = subroot;
           new_root->children_[1] = ret;
           new_root->keys_[0] = mk;
@@ -927,10 +927,10 @@ retry_cur_leaf:
         resp_leaf->mark_modifying();
 
         leaf_node *new_root = leaf_node::alloc();
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
         new_root->lock();
         new_root->mark_modifying();
-#endif /* CHECK_INVARIANTS */
+#endif
         new_root->set_root();
         varkey old_slice(resp_leaf->suffix(lenmatch));
         new_root->keys_[0] = old_slice.slice();
@@ -948,9 +948,9 @@ retry_cur_leaf:
           resp_leaf->suffixes_[lenmatch].swap(i);
         }
         resp_leaf->value_set_layer(lenmatch);
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
         new_root->unlock();
-#endif /* CHECK_INVARIANTS */
+#endif
 
         key_slice mk;
         node *ret;
@@ -997,7 +997,7 @@ retry_cur_leaf:
       }
       resp_leaf->inc_key_slots_used();
 
-//#ifdef CHECK_INVARIANTS
+//#ifndef NDEBUG
 //      resp_leaf->base_invariant_unique_keys_check();
 //#endif
       if (insert_info) {
@@ -1066,11 +1066,11 @@ retry_cur_leaf:
       leaf_node *new_leaf = leaf_node::alloc();
       new_leaf->prefetch();
 
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
       new_leaf->lock();
       new_leaf->mark_modifying();
       locked_nodes.push_back(new_leaf);
-#endif /* CHECK_INVARIANTS */
+#endif
 
       if (!resp_leaf->next_ && resp_leaf->keys_[n - 1] < kslice) {
         // sequential insert optimization- in this case, we don't bother
@@ -1165,11 +1165,11 @@ retry_cur_leaf:
           resp_leaf->set_key_slots_used(split_point);
           new_leaf->set_key_slots_used(NKeysPerNode - split_point + 1);
 
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
           resp_leaf->base_invariant_unique_keys_check();
           new_leaf->base_invariant_unique_keys_check();
           ASSERT(resp_leaf->keys_[split_point - 1] < new_leaf->keys_[0]);
-#endif /* CHECK_INVARIANTS */
+#endif
 
         } else {
           // XXX: not really sure if this invariant is true, but we rely
@@ -1205,11 +1205,11 @@ retry_cur_leaf:
           resp_leaf->set_key_slots_used(split_point + 1);
           new_leaf->set_key_slots_used(NKeysPerNode - split_point);
 
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
           resp_leaf->base_invariant_unique_keys_check();
           new_leaf->base_invariant_unique_keys_check();
           ASSERT(resp_leaf->keys_[split_point] < new_leaf->keys_[0]);
-#endif /* CHECK_INVARIANTS */
+#endif
         }
       }
 
@@ -1274,11 +1274,11 @@ retry_cur_leaf:
 
       internal_node *new_internal = internal_node::alloc();
       new_internal->prefetch();
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
       new_internal->lock();
       new_internal->mark_modifying();
       locked_nodes.push_back(new_internal);
-#endif /* CHECK_INVARIANTS */
+#endif
 
       // there are three cases post-split:
       // (1) mk goes in the original node
@@ -1368,11 +1368,11 @@ retry:
     ASSERT(local_root->is_root());
     ASSERT(local_root == *root_location);
     internal_node *new_root = internal_node::alloc();
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     new_root->lock();
     new_root->mark_modifying();
     locked_nodes.push_back(new_root);
-#endif /* CHECK_INVARIANTS */
+#endif
     new_root->children_[0] = local_root;
     new_root->children_[1] = ret;
     new_root->keys_[0] = mk;
@@ -1414,8 +1414,6 @@ btree<P>::remove0(node *np,
   if (leaf_node *leaf = AsLeafCheck(np)) {
     ASSERT(locked_nodes.empty());
 
-    SINGLE_THREADED_INVARIANT(!left_node || (leaf->prev_ == left_node && AsLeaf(left_node)->next == leaf));
-    SINGLE_THREADED_INVARIANT(!right_node || (leaf->next_ == right_node && AsLeaf(right_node)->prev == leaf));
 
 retry_cur_leaf:
     uint64_t version;
@@ -1639,11 +1637,11 @@ retry_cur_leaf:
             new_key = right_sibling->keys_[0];
             right_sibling->min_key_ = new_key;
 
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
             leaf->base_invariant_unique_keys_check();
             right_sibling->base_invariant_unique_keys_check();
             ASSERT(leaf->keys_[n - 1 + steal_point - 1] < new_key);
-#endif /* CHECK_INVARIANTS */
+#endif
 
             return R_STOLE_FROM_RIGHT;
           } else {
@@ -1691,9 +1689,8 @@ retry_cur_leaf:
         // leaf->prev_->next might change, however, since the left node could be
         // splitting (and we might hold a pointer to the left-split of the left node,
         // before it gets updated)
-        SINGLE_THREADED_INVARIANT(!leaf->prev_ || leaf->prev_->next_ == leaf);
 
-//#ifdef CHECK_INVARIANTS
+//#ifndef NDEBUG
 //        leaf->base_invariant_unique_keys_check();
 //#endif
         leaf_node::release(right_sibling);
@@ -1744,11 +1741,11 @@ retry_cur_leaf:
             new_key = leaf->keys_[0];
             leaf->min_key_ = new_key;
 
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
             leaf->base_invariant_unique_keys_check();
             left_sibling->base_invariant_unique_keys_check();
             ASSERT(left_sibling->keys_[left_n - nstolen - 1] < new_key);
-#endif /* CHECK_INVARIANTS */
+#endif
 
             return R_STOLE_FROM_LEFT;
           } else {
@@ -1784,12 +1781,7 @@ retry_cur_leaf:
         if (leaf->next_)
           leaf->next_->prev_ = left_sibling;
 
-        // see comments in right_sibling case above, for why one of them is ASSERT and
-        // the other is SINGLE_THREADED_INVARIANT
         ASSERT(!left_sibling->next_ || left_sibling->next_->prev_ == left_sibling);
-        SINGLE_THREADED_INVARIANT(
-            !left_sibling->prev_ ||
-            left_sibling->prev_->next_ == left_sibling);
 
         //left_sibling->base_invariant_unique_keys_check();
         leaf_node::release(leaf);

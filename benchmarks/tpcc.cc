@@ -159,7 +159,7 @@ public:
     ALWAYS_ASSERT(!did_lock);
     if (locks.size() > 1)
       sort(locks.begin(), locks.end());
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     if (set<T *>(locks.begin(), locks.end()).size() != locks.size()) {
       for (auto &t : locks)
         cerr << "lock: " << hexify(t) << endl;
@@ -1552,7 +1552,7 @@ public:
     ASSERT(keylen == sizeof(new_order::key));
     ASSERT(value.size() == sizeof(new_order::value));
     k_no = Decode(keyp, k_no_temp);
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     new_order::value v_no_temp;
     const new_order::value *v_no = Decode(value, v_no_temp);
     checker::SanityCheckNewOrder(k_no, v_no);
@@ -1632,7 +1632,7 @@ tpcc_worker::txn_delivery()
         order_line::value v_ol_temp;
         const order_line::value *v_ol = Decode(*c.values[i].second, v_ol_temp);
 
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
         order_line::key k_ol_temp;
         const order_line::key *k_ol = Decode(*c.values[i].first, k_ol_temp);
         checker::SanityCheckOrderLine(k_ol, v_ol);
@@ -1982,7 +1982,7 @@ public:
     ASSERT(keylen == sizeof(order_line::key));
     order_line::value v_ol_temp;
     const order_line::value *v_ol UNUSED = Decode(value, v_ol_temp);
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     order_line::key k_ol_temp;
     const order_line::key *k_ol = Decode(keyp, k_ol_temp);
     checker::SanityCheckOrderLine(k_ol, v_ol);
@@ -2122,7 +2122,7 @@ public:
     order_line::value v_ol_temp;
     const order_line::value *v_ol = Decode(value, v_ol_temp);
 
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     order_line::key k_ol_temp;
     const order_line::key *k_ol = Decode(keyp, k_ol_temp);
     checker::SanityCheckOrderLine(k_ol, v_ol);
@@ -2402,8 +2402,8 @@ tpcc_worker::txn_microbench_random()
 	}
 
 	ASSERT(cout << "micro-random finished" << endl);
-#ifdef CHECK_INVARIANTS
-    abort();
+#ifndef NDEBUG
+  abort();
 #endif
 
 	measure_txn_counters(txn, "txn_microbench_random");

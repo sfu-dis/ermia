@@ -26,7 +26,7 @@ ERMIA supports Read Committed (RC), Snapshot Isolation (SI), Serializable Snapsh
 
 * `#define SSI` to use serializable snapshot isolation (SSI);
 * `#define SSN` to use the serial safety net (SSN);
-   - SSN may be used in conjunction with RC (`USE_READ_COMMITTED`) or SI (default);
+   - SSN may be used in conjunction with RC (`RC`) or SI (default);
    - `# define EARLY_SSN_CHECK` enables SSN window exclusion tests during normal reads and writes.
 
 `SSI` and `SSN` are mutually exclusive.

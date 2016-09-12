@@ -790,7 +790,7 @@ sm_oid_mgr::oid_put_update(oid_array *oa,
                            xid_context *updater_xc,
                            fat_ptr *new_obj_ptr)
 {
-#if CHECK_INVARIANTS
+#ifndef NDEBUG
     int attempts = 0;
 #endif
     auto *ptr = ensure_tuple(oa, o, updater_xc->begin_epoch);
@@ -830,7 +830,7 @@ start_over:
 
         xid_context *holder= xid_get_context(holder_xid);
         if (not holder) {
-#if CHECK_INVARIANTS
+#ifndef NDEBUG
             auto t = volatile_read(old_desc->_clsn).asi_type();
             ASSERT(t == fat_ptr::ASI_LOG or oid_get(oa, o) != head);
 #endif
@@ -843,7 +843,7 @@ start_over:
 
         // context still valid for this XID?
         if (unlikely(owner != holder_xid)) {
-#if CHECK_INVARIANTS
+#ifndef NDEBUG
             ASSERT(attempts < 2);
             attempts++;
 #endif
@@ -864,7 +864,7 @@ start_over:
     // check dirty writes
     else {
         ASSERT(clsn.asi_type() == fat_ptr::ASI_LOG );
-#ifndef USE_READ_COMMITTED
+#ifndef RC
         // First updater wins: if some concurrent tx committed first,
         // I have to abort. Same as in Oracle. Otherwise it's an isolation
         // failure: I can modify concurrent transaction's writes.
@@ -1038,8 +1038,8 @@ start_over:
             if (state == TXN_CMMTD) {
                 ASSERT(volatile_read(holder->end));
                 ASSERT(owner == holder_xid);
-#ifdef USE_READ_COMMITTED
-#if defined(SSI) || defined(SSN)
+#if defined(RC) || defined(RC_SPIN)
+#ifdef SSN
                 if (sysconf::enable_safesnap and visitor_xc->xct->flags & transaction::TXN_FLAG_READ_ONLY) {
                     if (holder->end < visitor_xc->begin) {
                         return cur_obj->tuple();
@@ -1048,53 +1048,47 @@ start_over:
                 else {
                     return cur_obj->tuple();
                 }
-#else
+#else  // SSN
                 return cur_obj->tuple();
-#endif
-#else
+#endif  // SSN
+#else  // not RC/RC_SPIN
                 if (holder->end < visitor_xc->begin) {
                     return cur_obj->tuple();
-                }
-#if defined(SSI) or defined(SSN)
-                else {
+                } else {
                     oid_check_phantom(visitor_xc, holder->end);
                 }
 #endif
-#endif
-            }
-#ifdef READ_COMMITTED_SPIN
-            else {
+            } else {
+#ifdef RC_SPIN
                 // spin until the tx is settled (either aborted or committed)
-                if (wait_for_commit_result(holder))
+                if (spin_for_cstamp(holder_xid, holder) == TXN_CMMTD) {
                     return cur_obj->tuple();
-            }
+                }
 #endif
+            }
         }
         else if (clsn.asi_type() == fat_ptr::ASI_LOG) {
-#ifdef USE_READ_COMMITTED
-#if defined(SSI) || defined(SSN)
+#if defined(RC) || defined(RC_SPIN)
+#if defined(SSN)
             if (sysconf::enable_safesnap and visitor_xc->xct->flags & transaction::TXN_FLAG_READ_ONLY) {
-                if (LSN::from_ptr(clsn) <= visitor_xc->begin)
+                if (LSN::from_ptr(clsn).offset() <= visitor_xc->begin) {
                     return cur_obj->tuple();
-            }
-            else
+                } else {
+                    oid_check_phantom(visitor_xc, clsn.offset());
+                }
+            } else {
                 return cur_obj->tuple();
+            }
 #else
             return cur_obj->tuple();
 #endif
 #else  // Not RC
             if (LSN::from_ptr(clsn).offset() <= visitor_xc->begin) {
                 return cur_obj->tuple();
-            }
-#if defined(SSI) or defined(SSN)
-            else {
+            } else {
                 oid_check_phantom(visitor_xc, clsn.offset());
             }
 #endif
-#endif
-        }
-        else {
-            ALWAYS_ASSERT(false);
         }
     }
 
@@ -1103,6 +1097,7 @@ start_over:
 
 void
 sm_oid_mgr::oid_check_phantom(xid_context *visitor_xc, uint64_t vcstamp) {
+#if defined(PHANTOM_PROT) && (defined(SSI) || defined(SSN))
   /*
    * tzwang (May 05, 2016): Preventing phantom:
    * Consider an example:
@@ -1138,6 +1133,8 @@ sm_oid_mgr::oid_check_phantom(xid_context *visitor_xc, uint64_t vcstamp) {
   visitor_xc->set_sstamp(std::min(visitor_xc->sstamp.load(), vcstamp));
   // TODO(tzwang): do early SSN check here
 #endif  // SSI/SSN
+#else
+#endif
 }
 
 void

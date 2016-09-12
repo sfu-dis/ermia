@@ -46,7 +46,6 @@ main(int argc, char **argv)
   void (*test_fn)(abstract_db *, int argc, char **argv) = NULL;
   string bench_type = "ycsb";
   char *curdir = get_current_dir_name();
-  string basedir = curdir;
   string bench_opts;
   free(curdir);
   int saw_run_spec = 0;
@@ -62,7 +61,6 @@ main(int argc, char **argv)
       {"bench"                      , required_argument , 0                          , 'b'} ,
       {"scale-factor"               , required_argument , 0                          , 's'} ,
       {"num-threads"                , required_argument , 0                          , 't'} ,
-      {"basedir"                    , required_argument , 0                          , 'B'} ,
       {"txn-flags"                  , required_argument , 0                          , 'f'} ,
       {"runtime"                    , required_argument , 0                          , 'r'} ,
       {"ops-per-worker"             , required_argument , 0                          , 'n'} ,
@@ -122,10 +120,6 @@ main(int argc, char **argv)
       sysconf::ssn_read_opt_threshold = strtoul(optarg, NULL, 16);
       break;
 #endif
-
-    case 'B':
-      basedir = optarg;
-      break;
 
     case 'f':
       txn_flags = strtoul(optarg, NULL, 10);
@@ -203,11 +197,11 @@ main(int argc, char **argv)
     return 1;
   }
 
-#ifdef DEBUG
+#ifndef NDEBUG
   cerr << "WARNING: benchmark built in DEBUG mode!!!" << endl;
 #endif
 
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
   cerr << "WARNING: invariant checking is enabled - should disable for benchmark" << endl;
 #ifdef PARANOID_CHECKING
   cerr << "  *** Paranoid checking is enabled ***" << endl;
@@ -218,13 +212,18 @@ main(int argc, char **argv)
 #ifdef SSI
     printf("System: SSI\n");
 #elif defined(SSN)
-#ifdef USE_READ_COMMITTED
+#ifdef RC
     printf("System: RC+SSN\n");
 #else
     printf("System: SI+SSN\n");
 #endif
 #else
     printf("System: SI\n");
+#endif
+#ifdef PHANTOM_PROT
+    printf("Phantom protection: on\n");
+#else
+    printf("Phantom protection: off\n");
 #endif
     cerr << "Database Benchmark:"                           << endl;
     cerr << "  pid: " << getpid()                           << endl;
@@ -238,7 +237,6 @@ main(int argc, char **argv)
     cerr << "  scale       : " << scale_factor              << endl;
     cerr << "  num-threads : " << sysconf::worker_threads   << endl;
     cerr << "  numa-nodes  : " << sysconf::numa_nodes       << endl;
-    cerr << "  basedir     : " << basedir                   << endl;
     cerr << "  txn-flags   : " << hexify(txn_flags)         << endl;
     if (run_mode == RUNMODE_TIME)
       cerr << "  runtime     : " << runtime                 << endl;

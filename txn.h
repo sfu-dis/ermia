@@ -243,7 +243,7 @@ public:
   }
 
   void add_to_write_set(fat_ptr objptr, oid_array *oa, OID oid) {
-#if CHECK_INVARIANTS
+#ifndef NDEBUG
     for (uint32_t i = 0; i < write_set->size(); ++i) {
       auto& w = write_set[i];
       ASSERT(w.new_object != objptr);

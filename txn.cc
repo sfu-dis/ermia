@@ -1063,7 +1063,7 @@ transaction::si_commit()
             // construct the (sub)list here so that we have only one XCHG per tx
             enqueue_recycle_oids(w);
         }
-#if CHECK_INVARIANT
+#ifndef NDEBUG
         object *obj = tuple->get_object();
         fat_ptr pdest = volatile_read(obj->_pdest);
         ASSERT((pdest == NULL_PTR and not tuple->size) or

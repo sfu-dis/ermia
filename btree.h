@@ -34,7 +34,7 @@ namespace private_ {
     static inline uint64_t
     Lock(uint64_t &t)
     {
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
       ASSERT(!P::IsLocked(t));
       t |= P::HDR_LOCKED_MASK;
       return t;
@@ -51,7 +51,7 @@ namespace private_ {
     static inline void
     Unlock(uint64_t &t)
     {
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
       ASSERT(P::IsLocked(t));
       t &= ~(P::HDR_LOCKED_MASK | P::HDR_MODIFYING_MASK);
 #endif
@@ -1191,13 +1191,13 @@ public:
         NKeysPerNode <=
         (VersionManip::HDR_KEY_SLOTS_MASK >> VersionManip::HDR_KEY_SLOTS_SHIFT), "XX");
 
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     root_->lock();
     root_->set_root();
     root_->unlock();
 #else
     root_->set_root();
-#endif /* CHECK_INVARIANTS */
+#endif
   }
 
   ~btree()
@@ -1217,13 +1217,13 @@ public:
   {
     recursive_delete(root_);
     root_ = leaf_node::alloc();
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     root_->lock();
     root_->set_root();
     root_->unlock();
 #else
     root_->set_root();
-#endif /* CHECK_INVARIANTS */
+#endif
   }
 
   /** Note: invariant checking is not thread safe */
@@ -1714,14 +1714,14 @@ private:
     ASSERT(leaf->key_slots_used() == n);
     ASSERT(pos < n);
     if (leaf->value_is_layer(pos)) {
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
       leaf->values_[pos].n_->lock();
 #endif
       leaf->values_[pos].n_->mark_deleting();
       ASSERT(leaf->values_[pos].n_->is_leaf_node());
       ASSERT(leaf->values_[pos].n_->key_slots_used() == 0);
       leaf_node::release((leaf_node *) leaf->values_[pos].n_);
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
       leaf->values_[pos].n_->unlock();
 #endif
     }
@@ -1795,7 +1795,7 @@ btree<P>::node::prefetch() const
 extern void TestConcurrentBtreeFast();
 extern void TestConcurrentBtreeSlow();
 
-#if !NDB_MASSTREE
+#ifndef MASSTREE
 typedef btree<concurrent_btree_traits> concurrent_btree;
 typedef btree<single_threaded_btree_traits> single_threaded_btree;
 #endif

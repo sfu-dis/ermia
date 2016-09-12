@@ -3,14 +3,14 @@
 #include "dbcore/sm-defs.h"
 
 /** options */
-//#define SSN
+#define SSN
 #ifdef SSN
 #define EARLY_SSN_CHECK // ssn checks during normal r/w
 #endif
 
-//#define USE_READ_COMMITTED
-//#ifdef USE_READ_COMMITTED
-//#define READ_COMMITTED_SPIN // spin until the tx is settled when hit an XID
+//#define RC
+//#ifdef RC
+//#define RC_SPIN // spin until the tx is settled when hit an XID
 //#endif
 
 //#define SSI
@@ -34,13 +34,7 @@
 //#define PARANOID_CHECKING
 //#define BTREE_LOCK_OWNERSHIP_CHECKING
 
-#ifndef CONFIG_H
-#error "no CONFIG_H set"
-#endif
-
-#include CONFIG_H
-
-#define CACHELINE_SIZE 64 // XXX: don't assume x86
+#define CACHELINE_SIZE 64
 #define LG_CACHELINE_SIZE __builtin_ctz(CACHELINE_SIZE)
 
 // some helpers for cacheline alignment
