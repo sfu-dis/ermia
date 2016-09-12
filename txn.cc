@@ -46,7 +46,7 @@ transaction::transaction(uint64_t flags, str_arena &sa)
 
     // Take a safe snapshot if read-only.
     if (sysconf::enable_safesnap and (flags & TXN_FLAG_READ_ONLY)) {
-        ASSERT(MM::safesnap_lsn.offset());
+        ASSERT(MM::safesnap_lsn);
         xc->begin = volatile_read(MM::safesnap_lsn);
         log = NULL;
     }
@@ -54,24 +54,31 @@ transaction::transaction(uint64_t flags, str_arena &sa)
         serial_register_tx(xid);
         RCU::rcu_enter();
         log = logmgr->new_tx_log();
-        xc->begin = LSN::make(logmgr->cur_lsn().offset() + 1, 0);
+        // Must +1: a tx T can only update a tuple if its latest version was
+        // created before T's begin timestamp (i.e., version.clsn < T.begin,
+        // note the range is exclusive; see first updater wins rule in
+        // oid_put_update() in sm-oid.cpp). Otherwise we risk making no
+        // progress when retrying an aborted transaction: everyone is trying
+        // to update the same tuple with latest version stamped at cur_lsn()
+        // but no one can succeed (because version.clsn == cur_lsn == t.begin).
+        xc->begin = logmgr->cur_lsn().offset() + 1;
 #ifdef USE_PARALLEL_SSN
-        xc->pstamp = volatile_read(MM::safesnap_lsn).offset();
+        xc->pstamp = volatile_read(MM::safesnap_lsn);
 #elif defined(USE_PARALLEL_SSI)
-        xc->last_safesnap = volatile_read(MM::safesnap_lsn).offset();
+        xc->last_safesnap = volatile_read(MM::safesnap_lsn);
 #endif
     }
 #else
     RCU::rcu_enter();
     log = logmgr->new_tx_log();
-    xc->begin = LSN::make(logmgr->cur_lsn().offset() + 1, 0);
+    xc->begin = logmgr->cur_lsn().offset() + 1;
 #endif
 }
 
 transaction::~transaction()
 {
     // transaction shouldn't fall out of scope w/o resolution
-    // resolution means TXN_EMBRYO, TXN_CMMTD, and TXN_ABRTD
+    // resolution means TXN_CMMTD, and TXN_ABRTD
     ASSERT(state() != TXN_ACTIVE && state() != TXN_COMMITTING);
 #if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
     if (not sysconf::enable_safesnap or (not (flags & TXN_FLAG_READ_ONLY)))
@@ -87,7 +94,7 @@ transaction::~transaction()
         serial_deregister_tx(xid);
 #endif
     if (sysconf::enable_safesnap and flags & TXN_FLAG_READ_ONLY)
-        MM::epoch_exit(INVALID_LSN, xc->begin_epoch);
+        MM::epoch_exit(0, xc->begin_epoch);
     else
         MM::epoch_exit(xc->end, xc->begin_epoch);
     xid_free(xid);    // must do this after epoch_exit, which uses xc.end
@@ -140,7 +147,6 @@ inline const char *
 transaction_state_to_cstr(txn_state state)
 {
     switch (state) {
-        case TXN_EMBRYO: return "TXN_EMBRYO";
         case TXN_ACTIVE: return "TXN_ACTIVE";
         case TXN_ABRTD: return "TXN_ABRTD";
         case TXN_CMMTD: return "TXN_CMMTD";
@@ -181,18 +187,8 @@ transaction::dump_debug_info() const
 rc_t
 transaction::commit()
 {
-    switch (state()) {
-        case TXN_EMBRYO:
-        case TXN_ACTIVE:
-            volatile_write(xc->state, TXN_COMMITTING);
-            break;
-        case TXN_CMMTD:
-        case TXN_COMMITTING:
-        case TXN_ABRTD:
-        case TXN_INVALID:
-            ALWAYS_ASSERT(false);
-    }
-
+    ALWAYS_ASSERT(state() == TXN_ACTIVE);
+    volatile_write(xc->state, TXN_COMMITTING);
 #if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
     // Safe snapshot optimization for read-only transactions:
     // Use the begin ts as cstamp if it's a read-only transaction
@@ -206,8 +202,8 @@ transaction::commit()
     }
     else {
         ASSERT(log);
-        xc->end = log->pre_commit();
-        if (xc->end == INVALID_LSN)
+        xc->end = log->pre_commit().offset();
+        if (xc->end == 0)
             return rc_t{RC_ABORT_INTERNAL};
 #ifdef USE_PARALLEL_SSN
         return parallel_ssn_commit();
@@ -235,7 +231,7 @@ transaction::commit()
 rc_t
 transaction::parallel_ssn_commit()
 {
-    auto cstamp = xc->end.offset();
+    auto cstamp = xc->end;
 
     // note that sstamp comes from reads, but the read optimization might
     // ignore looking at tuple's sstamp at all, so if tx sstamp is still
@@ -260,7 +256,6 @@ transaction::parallel_ssn_commit()
     try_get_sucessor:
         // so tuple should be the committed version I read
         ASSERT(r->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
-
         // read tuple->slsn to a local variable before doing anything relying on it,
         // it might be changed any time...
         fat_ptr sucessor_clsn = volatile_read(r->sstamp);
@@ -278,7 +273,7 @@ transaction::parallel_ssn_commit()
                 continue;
 
             // read everything before doing anything
-            auto sucessor_end = volatile_read(sucessor_xc->end).offset();
+            auto sucessor_end = volatile_read(sucessor_xc->end);
             if (successor_owner != successor_xid)
                 goto try_get_sucessor;
 
@@ -349,7 +344,7 @@ transaction::parallel_ssn_commit()
                     // reader_end for getting pstamp;
                     // reader_owner for further detection of context chagne
                     // Note: must get reader_owner after getting end and begin.
-                    reader_end = volatile_read(reader_xc->end).offset();
+                    reader_end = volatile_read(reader_xc->end);
                     reader_owner = volatile_read(reader_xc->owner);
                 }
             }
@@ -402,7 +397,7 @@ transaction::parallel_ssn_commit()
                         } else {
                             // Now we know reader_xc->set_sstamp failed, which implies that the
                             // reader has concluded. Try to find out its clsn here as my pstamp.
-                            auto rend = volatile_read(reader_xc->end).offset();
+                            auto rend = volatile_read(reader_xc->end);
                             auto rowner = volatile_read(reader_xc->owner);
                             if (rxid == rowner) {
                                 // It's this guy, we can rely on rend
@@ -488,6 +483,7 @@ transaction::parallel_ssn_commit()
 
     // post-commit: stuff access stamps for reads; init new versions
     auto clsn = xc->end;
+    fat_ptr clsn_ptr = LSN::make(clsn, 0).to_log_ptr();
     for (auto &w : write_set) {
         dbtuple *tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
@@ -505,7 +501,7 @@ transaction::parallel_ssn_commit()
             next_tuple->welcome_readers();
         }
         volatile_write(tuple->xstamp, cstamp);
-        volatile_write(tuple->get_object()->_clsn, clsn.to_log_ptr());
+        volatile_write(tuple->get_object()->_clsn, clsn_ptr);
         ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one CAS per tx
@@ -540,7 +536,7 @@ transaction::parallel_ssn_commit()
             if (oxid != this->xid) {    // exclude myself
                 xid_context *ox = xid_get_context(oxid);
                 if (ox) {
-                    auto ox_end = volatile_read(ox->end).offset();
+                    auto ox_end = volatile_read(ox->end);
                     auto ox_owner = volatile_read(ox->owner);
                     if (ox_owner == oxid and ox_end and ox_end < cstamp)
                         spin_for_cstamp(oxid, ox);
@@ -633,7 +629,7 @@ transaction::parallel_ssi_commit()
     //  because the reader won't remove itself from the bitmap unless it updated
     //  v.xstamp.
 
-    auto cstamp = xc->end.offset();
+    auto cstamp = xc->end;
 
     // get the smallest s1 in each tuple we have read (ie, the smallest cstamp
     // of T3 in the dangerous structure that clobbered our read)
@@ -655,7 +651,7 @@ transaction::parallel_ssi_commit()
             if (not overwriter_xc)
                 goto get_overwriter;
             // read what i need before verifying ownership
-            uint64_t overwriter_end = volatile_read(overwriter_xc->end).offset();
+            uint64_t overwriter_end = volatile_read(overwriter_xc->end);
             if (volatile_read(overwriter_xc->owner) != ox)
                 goto get_overwriter;
             // Spin if the overwriter entered precommit before me: need to
@@ -724,7 +720,7 @@ transaction::parallel_ssi_commit()
                     reader_xc = xid_get_context(rxid);
                     if (reader_xc) {
                         // copy everything before doing anything
-                        reader_end = volatile_read(reader_xc->end).offset();
+                        reader_end = volatile_read(reader_xc->end);
                         reader_owner = volatile_read(reader_xc->owner);
                     }
                 }
@@ -788,6 +784,7 @@ transaction::parallel_ssi_commit()
     // survived!
     log->commit(NULL);
 
+    fat_ptr clsn_ptr = LSN::make(cstamp, 0).to_log_ptr();
     // stamp overwritten versions, stuff clsn
     auto clsn = xc->end;
     for (auto &w : write_set) {
@@ -798,14 +795,14 @@ transaction::parallel_ssi_commit()
         dbtuple *overwritten_tuple = tuple->next();
         if (overwritten_tuple) {    // update
             ASSERT(XID::from_ptr(volatile_read(overwritten_tuple->sstamp)) == xid);
-            volatile_write(overwritten_tuple->sstamp, LSN::make(cstamp, 0).to_log_ptr());
+            volatile_write(overwritten_tuple->sstamp, clsn_ptr);
             if (ct3) {
                 ASSERT(not overwritten_tuple->s2);
                 volatile_write(overwritten_tuple->s2, ct3);
             }
         }
         volatile_write(tuple->xstamp, cstamp);
-        volatile_write(tuple->get_object()->_clsn, clsn.to_log_ptr());
+        volatile_write(tuple->get_object()->_clsn, clsn_ptr);
         ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one XCHG per tx
@@ -849,7 +846,7 @@ transaction::parallel_ssi_commit()
             if (oxid != this->xid) {    // exclude myself
                 xid_context *ox = xid_get_context(oxid);
                 if (ox) {
-                    auto ox_end = volatile_read(ox->end).offset();
+                    auto ox_end = volatile_read(ox->end);
                     auto ox_owner = volatile_read(ox->owner);
                     if (ox_owner == oxid and ox_end and ox_end < cstamp)
                         spin_for_cstamp(oxid, ox);
@@ -879,8 +876,8 @@ transaction::si_commit()
 {
     ASSERT(log);
     // get clsn, abort if failed
-    xc->end = log->pre_commit();
-    if (xc->end == INVALID_LSN)
+    xc->end = log->pre_commit().offset();
+    if (xc->end == 0)
         return rc_t{RC_ABORT_INTERNAL};
 
 #ifdef PHANTOM_PROT_NODE_SET
@@ -894,13 +891,14 @@ transaction::si_commit()
     // (traverse write-tuple)
     // stuff clsn in tuples in write-set
     auto clsn = xc->end;
+    fat_ptr clsn_ptr = LSN::make(clsn, 0).to_log_ptr();
     for (auto &w : write_set) {
         dbtuple* tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
             continue;
         ASSERT(w.oa);
         tuple->do_write();
-        tuple->get_object()->_clsn = clsn.to_log_ptr();
+        tuple->get_object()->_clsn = clsn_ptr;
         ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one XCHG per tx
@@ -1132,7 +1130,7 @@ transaction::ssi_read(dbtuple *tuple)
         // Read-only optimization: s2 is not a problem if we're read-only and
         // my begin ts is earlier than s2.
         if (not ((sysconf::enable_ssi_read_only_opt and write_set.size() == 0) and
-                 xc->begin.offset() < tuple->s2)) {
+                 xc->begin < tuple->s2)) {
             // sstamp will be valid too if s2 is valid
             ASSERT(tuple->sstamp.asi_type() == fat_ptr::ASI_LOG);
             return rc_t{RC_ABORT_SERIAL};
