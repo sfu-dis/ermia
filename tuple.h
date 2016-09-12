@@ -122,23 +122,27 @@ public:
            not __sync_bool_compare_and_swap(&preader, pr, PERSISTENT_READER_MARK));
     return true;
   }
+#endif
+#if defined(SSN)
   inline ALWAYS_INLINE bool has_persistent_reader() {
     return volatile_read(preader) & PERSISTENT_READER_MARK;
   }
+  // XXX: for the writer who's updating this tuple only
+  inline ALWAYS_INLINE void lockout_read_mostly_tx() {
+    if (sysconf::ssn_read_opt_enabled()) {
+      if (not (volatile_read(preader) >> 7))
+          __sync_fetch_and_xor(&preader, uint64_t{1} << 7);
+      ASSERT(volatile_read(preader) >> 7);
+    }
+  }
 
   // XXX: for the writer who's updating this tuple only
-  inline ALWAYS_INLINE void lockout_readers() {
-    if (not (volatile_read(preader) >> 7))
-        __sync_fetch_and_xor(&preader, uint64_t{1} << 7);
-    ASSERT(volatile_read(preader) >> 7);
-  }
-#endif
-#if defined(SSN) || defined(SSI)
-  // XXX: for the writer who's updating this tuple only
-  inline ALWAYS_INLINE void welcome_readers() {
-    if (volatile_read(preader) >> 7)
-        __sync_fetch_and_xor(&preader, uint64_t{1} << 7);
-    ASSERT(not (volatile_read(preader) >> 7));
+  inline ALWAYS_INLINE void welcome_read_mostly_tx() {
+    if (sysconf::ssn_read_opt_enabled()) {
+      if (volatile_read(preader) >> 7)
+          __sync_fetch_and_xor(&preader, uint64_t{1} << 7);
+      ASSERT(not (volatile_read(preader) >> 7));
+    }
   }
 #endif
 

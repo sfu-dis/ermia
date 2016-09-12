@@ -41,6 +41,9 @@ inline void set_pstamp(uint64_t p) {
     volatile_write(pstamp, std::max(pstamp, p));
 }
 #endif
+inline bool verify_owner(XID assumed) {
+    return volatile_read(owner) == assumed;
+}
 };
 
 static uint16_t const NCONTEXTS = 32768;
