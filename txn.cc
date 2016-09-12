@@ -15,25 +15,42 @@ using namespace std;
 using namespace util;
 using namespace TXN;
 
+// XXX(tzwang): TLS read and write sets to avoid malloc -
+// much faster especially under high contention
+static __thread transaction::write_set_t* tls_write_set;
+#if defined(SSN) || defined(SSI)
+static __thread transaction::read_set_t* tls_read_set;
+#endif
+
 transaction::transaction(uint64_t flags, str_arena &sa)
   : flags(flags), sa(&sa)
 {
 #ifdef BTREE_LOCK_OWNERSHIP_CHECKING
     concurrent_btree::NodeLockRegionBegin();
 #endif
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     absent_set.set_empty_key(NULL);    // google dense map
     absent_set.clear();
 #endif
-    write_set.clear();
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
-    read_set.clear();
+    if (unlikely(not tls_write_set)) {
+        tls_write_set = new write_set_t;
+        tls_write_set->reserve(2000);
+    }
+    write_set = tls_write_set;
+    write_set->clear();
+#if defined(SSN) || defined(SSI)
+    if (unlikely(not tls_read_set)) {
+        tls_read_set = new read_set_t;
+        tls_read_set->reserve(2000);
+    }
+    read_set = tls_read_set;
+    read_set->clear();
 #endif
     updated_oids_head = updated_oids_tail = NULL_PTR;
     xid = TXN::xid_alloc();
     xc = xid_get_context(xid);
     xc->begin_epoch = MM::epoch_enter();
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     xc->xct = this;
     // If there's a safesnap, then SSN treats the snapshot as a transaction
     // that has read all the versions, which means every update transaction
@@ -46,7 +63,7 @@ transaction::transaction(uint64_t flags, str_arena &sa)
 
     // Take a safe snapshot if read-only.
     if (sysconf::enable_safesnap and (flags & TXN_FLAG_READ_ONLY)) {
-        ASSERT(MM::safesnap_lsn.offset());
+        ASSERT(MM::safesnap_lsn);
         xc->begin = volatile_read(MM::safesnap_lsn);
         log = NULL;
     }
@@ -54,26 +71,33 @@ transaction::transaction(uint64_t flags, str_arena &sa)
         serial_register_tx(xid);
         RCU::rcu_enter();
         log = logmgr->new_tx_log();
-        xc->begin = LSN::make(logmgr->cur_lsn().offset() + 1, 0);
-#ifdef USE_PARALLEL_SSN
-        xc->pstamp = volatile_read(MM::safesnap_lsn).offset();
-#elif defined(USE_PARALLEL_SSI)
-        xc->last_safesnap = volatile_read(MM::safesnap_lsn).offset();
+        // Must +1: a tx T can only update a tuple if its latest version was
+        // created before T's begin timestamp (i.e., version.clsn < T.begin,
+        // note the range is exclusive; see first updater wins rule in
+        // oid_put_update() in sm-oid.cpp). Otherwise we risk making no
+        // progress when retrying an aborted transaction: everyone is trying
+        // to update the same tuple with latest version stamped at cur_lsn()
+        // but no one can succeed (because version.clsn == cur_lsn == t.begin).
+        xc->begin = logmgr->cur_lsn().offset() + 1;
+#ifdef SSN
+        xc->pstamp = volatile_read(MM::safesnap_lsn);
+#elif defined(SSI)
+        xc->last_safesnap = volatile_read(MM::safesnap_lsn);
 #endif
     }
 #else
     RCU::rcu_enter();
     log = logmgr->new_tx_log();
-    xc->begin = LSN::make(logmgr->cur_lsn().offset() + 1, 0);
+    xc->begin = logmgr->cur_lsn().offset() + 1;
 #endif
 }
 
 transaction::~transaction()
 {
     // transaction shouldn't fall out of scope w/o resolution
-    // resolution means TXN_EMBRYO, TXN_CMMTD, and TXN_ABRTD
-    INVARIANT(state() != TXN_ACTIVE && state() != TXN_COMMITTING);
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+    // resolution means TXN_CMMTD, and TXN_ABRTD
+    ASSERT(state() != TXN_ACTIVE && state() != TXN_COMMITTING);
+#if defined(SSN) || defined(SSI)
     if (not sysconf::enable_safesnap or (not (flags & TXN_FLAG_READ_ONLY)))
         RCU::rcu_exit();
 #else
@@ -82,28 +106,29 @@ transaction::~transaction()
 #ifdef BTREE_LOCK_OWNERSHIP_CHECKING
     concurrent_btree::AssertAllNodeLocksReleased();
 #endif
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     if (not sysconf::enable_safesnap or (not (flags & TXN_FLAG_READ_ONLY)))
         serial_deregister_tx(xid);
 #endif
     if (sysconf::enable_safesnap and flags & TXN_FLAG_READ_ONLY)
-        MM::epoch_exit(INVALID_LSN, xc->begin_epoch);
+        MM::epoch_exit(0, xc->begin_epoch);
     else
         MM::epoch_exit(xc->end, xc->begin_epoch);
     xid_free(xid);    // must do this after epoch_exit, which uses xc.end
 }
 
 void
-transaction::abort()
+transaction::abort_impl()
 {
     // Mark the dirty tuple as invalid, for oid_get_version to
     // move on more quickly.
     volatile_write(xc->state, TXN_ABRTD);
 
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     // Go over the read set first, to deregister from the tuple
     // asap so the updater won't wait for too long.
-    for (auto &r : read_set) {
+    for (uint32_t i = 0; i < read_set->size(); ++i) {
+        auto &r = (*read_set)[i];
         ASSERT(not r->is_defunct());
         ASSERT(r->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         // remove myself from reader list
@@ -111,17 +136,20 @@ transaction::abort()
     }
 #endif
 
-    for (auto &w : write_set) {
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+        auto &w = (*write_set)[i];
         dbtuple *tuple = w.get_object()->tuple();
         ASSERT(tuple);
         ASSERT(XID::from_ptr(tuple->get_object()->_clsn) == xid);
         if (tuple->is_defunct()) {   // for repeated overwrites
             continue;  // should have already called deallocate() during the update
         }
-#if defined(USE_PARALLEL_SSI) || defined(USE_PARALLEL_SSN)
+#if defined(SSI) || defined(SSN)
         if (tuple->next()) {
             volatile_write(tuple->next()->sstamp, NULL_PTR);
-            tuple->next()->welcome_readers();
+#ifdef SSN
+            tuple->next()->welcome_read_mostly_tx();
+#endif
         }
 #endif
         oidmgr->oid_unlink(w.oa, w.oid, tuple);
@@ -140,7 +168,6 @@ inline const char *
 transaction_state_to_cstr(txn_state state)
 {
     switch (state) {
-        case TXN_EMBRYO: return "TXN_EMBRYO";
         case TXN_ACTIVE: return "TXN_ACTIVE";
         case TXN_ABRTD: return "TXN_ABRTD";
         case TXN_CMMTD: return "TXN_CMMTD";
@@ -181,37 +208,27 @@ transaction::dump_debug_info() const
 rc_t
 transaction::commit()
 {
-    switch (state()) {
-        case TXN_EMBRYO:
-        case TXN_ACTIVE:
-            volatile_write(xc->state, TXN_COMMITTING);
-            break;
-        case TXN_CMMTD:
-        case TXN_COMMITTING:
-        case TXN_ABRTD:
-        case TXN_INVALID:
-            ALWAYS_ASSERT(false);
-    }
-
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+    ALWAYS_ASSERT(state() == TXN_ACTIVE);
+    volatile_write(xc->state, TXN_COMMITTING);
+#if defined(SSN) || defined(SSI)
     // Safe snapshot optimization for read-only transactions:
     // Use the begin ts as cstamp if it's a read-only transaction
     // This is the same for both SSN and SSI.
     if (sysconf::enable_safesnap and (flags & TXN_FLAG_READ_ONLY)) {
         ASSERT(not log);
-        ASSERT(write_set.size() == 0);
+        ASSERT(write_set->size() == 0);
         xc->end = xc->begin;
         volatile_write(xc->state, TXN_CMMTD);
         return {RC_TRUE};
     }
     else {
         ASSERT(log);
-        xc->end = log->pre_commit();
-        if (xc->end == INVALID_LSN)
+        xc->end = log->pre_commit().offset();
+        if (xc->end == 0)
             return rc_t{RC_ABORT_INTERNAL};
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
         return parallel_ssn_commit();
-#elif defined USE_PARALLEL_SSI
+#elif defined SSI
         return parallel_ssi_commit();
 #endif
     }
@@ -220,7 +237,7 @@ transaction::commit()
 #endif
 }
 
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
 #define set_tuple_xstamp(tuple, s)    \
 {   \
     uint64_t x;  \
@@ -231,11 +248,11 @@ transaction::commit()
 }
 #endif
 
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
 rc_t
 transaction::parallel_ssn_commit()
 {
-    auto cstamp = xc->end.offset();
+    auto cstamp = xc->end;
 
     // note that sstamp comes from reads, but the read optimization might
     // ignore looking at tuple's sstamp at all, so if tx sstamp is still
@@ -244,10 +261,10 @@ transaction::parallel_ssn_commit()
     // remained as the initial value.) Consider the extreme case where
     // old_version_threshold = 0: means no read set at all...
     if (is_read_mostly() && sysconf::ssn_read_opt_enabled()) {
-        if (xc->sstamp.load(std::memory_order_acquire) > cstamp)
+        if (xc->sstamp.load(std::memory_order_acquire) == 0)
             xc->sstamp.store(cstamp, std::memory_order_release);
     } else {
-        if (xc->sstamp.load(std::memory_order_relaxed) > cstamp)
+        if (xc->sstamp.load(std::memory_order_relaxed) == 0)
             xc->sstamp.store(cstamp, std::memory_order_relaxed);
     }
 
@@ -256,54 +273,106 @@ transaction::parallel_ssn_commit()
     // for writes, see if sb. has read the tuples - look at access lsn
 
     // Process reads first for a stable sstamp to be used for the read-optimization
-    for (auto &r : read_set) {
-    try_get_sucessor:
-        // so tuple should be the committed version I read
+    for (uint32_t i = 0; i < read_set->size(); ++i) {
+        auto &r = (*read_set)[i];
+    try_get_successor:
         ASSERT(r->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
-
         // read tuple->slsn to a local variable before doing anything relying on it,
         // it might be changed any time...
-        fat_ptr sucessor_clsn = volatile_read(r->sstamp);
-        if (sucessor_clsn == NULL_PTR)
+        fat_ptr successor_clsn = volatile_read(r->sstamp);
+        if (successor_clsn == NULL_PTR)
             continue;
 
-        // overwriter in progress?
-        if (sucessor_clsn.asi_type() == fat_ptr::ASI_XID) {
-            XID successor_xid = XID::from_ptr(sucessor_clsn);
-            xid_context *sucessor_xc = xid_get_context(successor_xid);
-            if (not sucessor_xc)
-                goto try_get_sucessor;
-            auto successor_owner = volatile_read(sucessor_xc->owner);
-            if (successor_owner == xc->owner)  // myself
+        if (successor_clsn.asi_type() == fat_ptr::ASI_LOG) {
+            // overwriter already fully committed/aborted or no overwriter at all
+            xc->set_sstamp(successor_clsn.offset());
+            if (not ssn_check_exclusion(xc)) {
+                return rc_t{RC_ABORT_SERIAL};
+            }
+        } else {
+            // overwriter in progress
+            ALWAYS_ASSERT(successor_clsn.asi_type() == fat_ptr::ASI_XID);
+            XID successor_xid = XID::from_ptr(successor_clsn);
+            xid_context *successor_xc = xid_get_context(successor_xid);
+            if (not successor_xc) {
+                goto try_get_successor;
+            }
+
+            if (volatile_read(successor_xc->owner) == xc->owner)  // myself
                 continue;
 
-            // read everything before doing anything
-            auto sucessor_end = volatile_read(sucessor_xc->end).offset();
-            if (successor_owner != successor_xid)
-                goto try_get_sucessor;
+            // Must obtain the successor's status first then check ownership
+            auto successor_state = volatile_read(successor_xc->state);
+            if (not successor_xc->verify_owner(successor_xid)) {
+                goto try_get_successor;
+            }
 
+            // Note the race between reading the successor's cstamp and the successor setting
+            // its cstamp after got one from the log: the successor could have got a cstamp but
+            // hasn't stored it in its cstamp field, so here must rely on the successor's state
+            // (set before obtaining cstamp) and then spin on successor's cstamp if necessary
+            // (state is not committing). Directly reading successor's cstamp might miss
+            // successors that have already got cstamp but hasn't stored it in successor_xc->end
+            // (esp. dangerous if its cstamp is smaller than mine - could miss successor).
+            if (successor_state == TXN_ACTIVE) {
+                // Not yet in pre-commit, skip
+                continue;
+            }
+            // Already in pre-commit or committed, definitely has (or will have) cstamp
+            uint64_t successor_end = 0;
+            bool should_continue = false;
+            while (not successor_end) {
+                // Must in the order of 1. read cstamp, 2. read state, 3. verify owner
+                auto s = volatile_read(successor_xc->end);
+                successor_state = volatile_read(successor_xc->state);
+                if (not successor_xc->verify_owner(successor_xid)) {
+                    goto try_get_successor;
+                }
+                if (successor_state == TXN_ABRTD) {
+                    // If there's a new overwriter, it must have a cstamp larger than mine
+                    should_continue = true;
+                    break;
+                }
+                ALWAYS_ASSERT(successor_state == TXN_CMMTD or successor_state == TXN_COMMITTING);
+                successor_end = s;
+            }
+            if (should_continue) {
+                continue;
+            }
             // overwriter might haven't committed, be commited after me, or before me
             // we only care if the successor is committed *before* me.
-            if (sucessor_end and sucessor_end < cstamp) {
-                auto cr = spin_for_cstamp(successor_xid, sucessor_xc);
-                // context change, previous overwriter must be gone,
-                // re-read sstamp (should see ASI_LOG this time).
-                if (cr == TXN_INVALID)
-                    goto try_get_sucessor;
-                else if (cr == TXN_CMMTD) {
-                    // Use relaxed for non-read-mostly tx? But maybe not worth the branch miss.
-                    xc->set_sstamp(sucessor_xc->sstamp.load(std::memory_order_acquire));
+            ALWAYS_ASSERT(successor_end);
+            ALWAYS_ASSERT(successor_end != cstamp);
+            if (successor_end > cstamp) {
+                continue;
+            }
+            if (successor_state == TXN_COMMITTING) {
+                // When we got successor_end, the successor was committing, use successor_end
+                // if it indeed committed
+                successor_state = spin_for_cstamp(successor_xid, successor_xc);
+            }
+            // Context change, previous overwriter was gone, retry (should see ASI_LOG this time).
+            if (successor_state == TXN_INVALID)
+                goto try_get_successor;
+            else if (successor_state == TXN_CMMTD) {
+                // Again, successor_xc->sstamp might change any time (i.e., successor_xc
+                // might get reused because successor concludes), so must read-then-verify.
+                auto s = successor_xc->sstamp.load(
+                    (sysconf::ssn_read_opt_enabled() && is_read_mostly()) ?
+                    std::memory_order_acquire : std::memory_order_relaxed);
+                if (not successor_xc->verify_owner(successor_xid)) {
+                    goto try_get_successor;
+                }
+                xc->set_sstamp(s);
+                if (not ssn_check_exclusion(xc)) {
+                    return rc_t{RC_ABORT_SERIAL};
                 }
             }
         }
-        else {
-            // overwriter already fully committed/aborted or no overwriter at all
-            ASSERT(sucessor_clsn.asi_type() == fat_ptr::ASI_LOG);
-            xc->set_sstamp(sucessor_clsn.offset());
-        }
     }
 
-    for (auto &w : write_set) {
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+        auto &w = (*write_set)[i];
         dbtuple *tuple = w.get_object()->tuple();
         if (tuple->is_defunct())    // repeated overwrites
             continue;
@@ -320,11 +389,11 @@ transaction::parallel_ssn_commit()
         ASSERT(XID::from_ptr(volatile_read(overwritten_tuple->sstamp)) == xid);
 
         // Do this before examining the preader field and reading the readers bitmap
-        overwritten_tuple->lockout_readers();
+        overwritten_tuple->lockout_read_mostly_tx();
 
         // Now readers who think this is an old version won't be able to read it
         // Then read the readers bitmap - it's guaranteed to cover all possible
-        // readers (those who think it's an old version) as we lockout_readers()
+        // readers (those who think it's an old version) as we lockout_read_mostly_tx()
         // first. Readers who think this is a young version can still come at any
         // time - they will be handled by the orignal SSN machinery.
         readers_bitmap_iterator readers_iter(&overwritten_tuple->readers_bitmap);
@@ -335,134 +404,155 @@ transaction::parallel_ssn_commit()
 
             XID rxid = volatile_read(rlist.xids[xid_idx]);
             ASSERT(rxid != xc->owner);
-            if (rxid == INVALID_XID)
-                continue;
 
             xid_context *reader_xc = NULL;
             uint64_t reader_end = 0;
-            XID reader_owner = INVALID_XID;
+            auto reader_state = TXN_ACTIVE;
 
-            if (rxid._val) {
+            if (rxid != INVALID_XID) {
                 reader_xc = xid_get_context(rxid);
                 if (reader_xc) {
                     // Copy everything before doing anything:
                     // reader_end for getting pstamp;
-                    // reader_owner for further detection of context chagne
-                    // Note: must get reader_owner after getting end and begin.
-                    reader_end = volatile_read(reader_xc->end).offset();
-                    reader_owner = volatile_read(reader_xc->owner);
+                    reader_state = volatile_read(reader_xc->state);
+                    reader_end = volatile_read(reader_xc->end);
                 }
             }
 
-            // Do this after copying everything we needed
-            auto last_read_mostly_cstamp = serial_get_last_read_mostly_cstamp(xid_idx);
-
-            if (not rxid._val or not reader_xc or reader_owner != rxid) {
-                if (overwritten_tuple->has_persistent_reader()) {
-                    // If the guy thought this was an old version, xstamp won't
-                    // be accurate, the writer should then consult the most recent
-                    // cstamp that was set by the (reader) transaction on this bit
-                    // position. Note that we can't just set pstamp to cstamp-1
-                    // because the updater here has no clue what the previous owner
-                    // of this bit position did and whether it will/already has a
-                    // cstamp < or > my cstamp - could have committed before or
-                    // after me, or didn't even read this verions (somebody even
-                    // earlier did); or could be still in progress if reader_owner
-                    // doesn't match rxid. Prepare for the worst, abort.
-                    return {RC_ABORT_RW_CONFLICT};
+            if (rxid == INVALID_XID or not reader_xc or not reader_xc->verify_owner(rxid)) {
+            context_change:
+                // Context change - the guy I saw was already gone, should read tuple xstamp
+                // (i.e., the reader should make sure it has set the xstamp for the tuple once
+                // it deregisters from the bitmap). The new guy that inherits this bit position
+                // will spin on me b/c it'll commit after me, and it will also set xstamp after
+                // spinning on me, so I'll still be reading the xstamp that really belongs to
+                // the older reader - reduces false +ves.)
+                if (sysconf::ssn_read_opt_enabled() and overwritten_tuple->has_persistent_reader()) {
+                    // If somebody thought this was an old version, xstamp alone won't be accurate,
+                    // should consult both tls read_mostly cstamp and xstamp (we consult xstamp in the
+                    // end of the readers loop for each version later in one go), e.g., a read-mostly
+                    // tx read it as an old version after a normal tx. Note that we can't just set
+                    // pstamp to cstamp-1 because the updater here has no clue what the previous
+                    // owner of this bit position did and how its cstamp compares to mine.
+                    uint64_t last_cstamp = serial_get_last_read_mostly_cstamp(xid_idx);
+                    if (last_cstamp > cstamp) {
+                        // Reader committed without knowing my existence with a larger cstamp,
+                        // ie it didn't account me as successor, nothing else to do than abort.
+                        return {RC_ABORT_RW_CONFLICT};
+                    }
+                    xc->set_pstamp(last_cstamp);
+                    if (not ssn_check_exclusion(xc)) {
+                        return rc_t{RC_ABORT_SERIAL};
+                    }
+                } // otherwise we will catch the tuple's xstamp outside the loop
+            } else {
+                // We have a valid context, now see if we should get reader's commit ts.
+                if (reader_state != TXN_ACTIVE and not reader_end) {
+                    while (not reader_end) {
+                        auto r = volatile_read(reader_xc->end);
+                        reader_state = volatile_read(reader_xc->state);
+                        if (not reader_xc->verify_owner(rxid)) {
+                            goto context_change;
+                        }
+                        if (reader_state == TXN_ABRTD) {
+                            reader_end = 0;
+                            break;
+                        }
+                        reader_end = r;
+                    }
                 }
-                else {
-                    // Not marked as an old version - follow normal SSN protocol.
-                    // Context change - the guy I saw was already gone. Now I need
-                    // to read the xstamp (i.e., the reader should make sure it has
-                    // set the xstamp for the tuple once it deregisters from the
-                    // bitmap). The new guy will spin on me b/c it'll commit after
-                    // me, and it will also set xstamp after finishing spinning on
-                    // me, so I'll still be reading the xstamp that really belongs
-                    // to the older reader - reduces false +ves.)
-                    auto tuple_xstamp = volatile_read(overwritten_tuple->xstamp);
-                    xc->set_pstamp(tuple_xstamp);
-                }
-            }
-            else if (not reader_end or reader_end > cstamp) {
-                ASSERT(rxid == reader_owner);
-                // Not in pre-commit yet or will (attempt to) commit after me,
-                // don't care... unless it's considered an old version by some
-                // reader. Still there's a chance to set its sstamp so that the
-                // reader will (implicitly) know my existence.
-                if (overwritten_tuple->has_persistent_reader()) {
-                    // Only read-mostly transactions will mark the persistent_reader bit;
-                    // if reader_xc isn't read-mostly, then it's definitely not him,
-                    // consult last_read_mostly_cstamp.
-                    if (reader_xc->xct->is_read_mostly() &&
-                        !reader_xc->set_sstamp(xc->sstamp.load(std::memory_order_acquire))) {
-                        if (reader_end) {
-                            // So reader_end will be the new pstamp
-                            last_read_mostly_cstamp = reader_end;
-                        } else {
-                            // Now we know reader_xc->set_sstamp failed, which implies that the
-                            // reader has concluded. Try to find out its clsn here as my pstamp.
-                            auto rend = volatile_read(reader_xc->end).offset();
-                            auto rowner = volatile_read(reader_xc->owner);
-                            if (rxid == rowner) {
-                                // It's this guy, we can rely on rend
-                                last_read_mostly_cstamp = reader_end = rend;
-                            } else {
-                                // Another transaction is using this context, refresh last_cstamp
-                                last_read_mostly_cstamp = serial_get_last_read_mostly_cstamp(xid_idx);
+                if (reader_state == TXN_ACTIVE or not reader_end or reader_end > cstamp) {
+                    // Not in pre-commit yet or will (attempt to) commit after me or aborted,
+                    // don't care... unless it's considered an old version by some reader.
+                    // Still there's a chance to set its sstamp so that the reader will
+                    // (implicitly) know my existence.
+                    if (sysconf::ssn_read_opt_enabled() and overwritten_tuple->has_persistent_reader()) {
+                        // Only read-mostly transactions will mark the persistent_reader bit;
+                        // if reader_xc isn't read-mostly, then it's definitely not him,
+                        // consult last_read_mostly_cstamp.
+                        // Need to account for previously committed read-mostly txs anyway
+                        uint64_t last_cstamp = serial_get_last_read_mostly_cstamp(xid_idx);
+                        if (reader_xc->xct->is_read_mostly() and
+                            not reader_xc->set_sstamp((~xid_context::sstamp_final_mark) & xc->sstamp.load(std::memory_order_acquire))) {
+                            // Failed setting the tx's sstamp - it must have finalized sstamp,
+                            // i.e., entered precommit, so it must have a valid cstamp.
+                            if (reader_end == 0) {
+                                reader_end = volatile_read(reader_xc->end);
                             }
+                            if (reader_xc->verify_owner(rxid)) {
+                                ALWAYS_ASSERT(reader_end);
+                                while (last_cstamp < reader_end) {
+                                    // Wait until the tx sets last_cstamp or aborts
+                                    last_cstamp = serial_get_last_read_mostly_cstamp(xid_idx);
+                                    if (volatile_read(reader_xc->state) == TXN_ABRTD or !reader_xc->verify_owner(rxid)) {
+                                        last_cstamp = serial_get_last_read_mostly_cstamp(xid_idx);
+                                        break;
+                                    }
+                                }
+                            } else {
+                                // context change - the tx must have already updated its
+                                // last_cstamp if committed.
+                                last_cstamp = serial_get_last_read_mostly_cstamp(xid_idx);
+                            }
+                            if (last_cstamp > cstamp) {
+                                // committed without knowing me
+                                return {RC_ABORT_RW_CONFLICT};
+                            }
+                        } // else it must be another transaction is using this context or
+                          // we succeeded setting the read-mostly tx's sstamp
+                        xc->set_pstamp(last_cstamp);
+                        if (not ssn_check_exclusion(xc)) {
+                            return rc_t{RC_ABORT_SERIAL};
                         }
                     }
-                    xc->set_pstamp(last_read_mostly_cstamp);
-                }
-            }
-            else {
-                ASSERT(reader_end and reader_end < cstamp);
-                if (overwritten_tuple->has_persistent_reader()) {
-                    // Some reader who thinks this is old version existed, two
-                    // options here: (1) spin on it and use reader_end-1 if it
-                    // aborted, use reader_end if committed and use last_read_mostly_cstamp
-                    // otherwise; (2) just use reader_end for simplicity
-                    // (betting it'll successfully commit).
-                    spin_for_cstamp(rxid, reader_xc);
-                    // Refresh last_read_mostly_cstamp here, it'll be reader_end if the
-                    // reader committed; or we just need to use the previous one
-                    // if it didn't commit or saw a context change.
-                    last_read_mostly_cstamp = serial_get_last_read_mostly_cstamp(xid_idx);
-                    xc->set_pstamp(last_read_mostly_cstamp);
-                }
-                else {
-                    // (Pre-) committed before me, need to wait for its cstamp for
-                    // a stable xstamp. But if my pstamp is already >= reader_end,
-                    // there's no need to wait for it then (pstamp increases).
-                    // Also in this case, no matter if the persistent reader bit
-                    // is on or off, I can use the guy's pstamp.
-                    auto cr = spin_for_cstamp(rxid, reader_xc);
-                    if (cr == TXN_CMMTD)
-                        xc->pstamp = reader_end;
-                    else if (cr == TXN_INVALID) {
-                        // Context change during the spin, no clue if the
-                        // reader committed or aborted - read the xstamp in
-                        // case it did committ (xstamp is stable now, b/c
-                        // it'll only deregister from the bitmap after
-                        // setting xstamp, and a context change means the
-                        // reader must've concluded - either aborted or
-                        // committed - and so deregistered from the bitmap)
-                        xc->set_pstamp(volatile_read(overwritten_tuple->xstamp));
-                    }   // else it's aborted, as if nothing happened
+                } else {
+                    ALWAYS_ASSERT(reader_end and reader_end < cstamp);
+                    if (sysconf::ssn_read_opt_enabled() and overwritten_tuple->has_persistent_reader()) {
+                        // Some reader who thinks this tuple is old existed, in case reader_xc
+                        // is read-mostly, spin on it and consult the read_mostly_cstamp. Note
+                        // still we need to refresh and read xstamp outside the loop in case this
+                        // isn't the real reader that I should care.
+                        if (reader_xc->xct->is_read_mostly()) {
+                            spin_for_cstamp(rxid, reader_xc);
+                        }
+                        xc->set_pstamp(serial_get_last_read_mostly_cstamp(xid_idx));
+                        if (not ssn_check_exclusion(xc)) {
+                            return rc_t{RC_ABORT_SERIAL};
+                        }
+                    }
+                    else {
+                        // (Pre-) committed before me, need to wait for its xstamp to finalize.
+                        if (spin_for_cstamp(rxid, reader_xc) == TXN_CMMTD) {
+                            xc->set_pstamp(reader_end);
+                            if (not ssn_check_exclusion(xc)) {
+                                return rc_t{RC_ABORT_SERIAL};
+                            }
+                        }
+                        // else aborted or context change during the spin, no clue if the reader
+                        // committed - read the xstamp in case it did committ (xstamp is stable
+                        // now, b/c it'll only deregister from the bitmap after setting xstamp,
+                        // and a context change means the reader must've concluded - either
+                        // aborted or committed - and so deregistered from the bitmap). We do this
+                        // outside the loop in one go.
+                    }
                 }
             }
         }
+        // Still need to re-read xstamp in case we missed any reader
+        xc->set_pstamp(volatile_read(overwritten_tuple->xstamp));
+        if (not ssn_check_exclusion(xc)) {
+            return rc_t{RC_ABORT_SERIAL};
+        }
     }
 
-    if (is_read_mostly()) {
+    if (sysconf::ssn_read_opt_enabled() and is_read_mostly()) {
         xc->finalize_sstamp();
     }
 
     if (not ssn_check_exclusion(xc))
         return rc_t{RC_ABORT_SERIAL};
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     if (not check_phantom())
         return rc_t{RC_ABORT_PHANTOM};
 #endif
@@ -475,20 +565,22 @@ transaction::parallel_ssn_commit()
     // my real state (CMMTD or ABRTD)
     // XXX: one optimization might be setting this only when read some
     // old versions.
-    if (is_read_mostly())
+    if (sysconf::ssn_read_opt_enabled() and is_read_mostly())
         serial_stamp_last_committed_lsn(xc->end);
 
     uint64_t my_sstamp = 0;
-    if (is_read_mostly()) {
-        my_sstamp = xc->sstamp.load(std::memory_order_acquire);
+    if (sysconf::ssn_read_opt_enabled() and is_read_mostly()) {
+        my_sstamp = xc->sstamp.load(std::memory_order_acquire) & (~xid_context::sstamp_final_mark);
     } else {
         my_sstamp = xc->sstamp.load(std::memory_order_relaxed);
     }
-    ASSERT(my_sstamp and my_sstamp != ~uint64_t{0});
+    ALWAYS_ASSERT(my_sstamp and (my_sstamp & xid_context::sstamp_final_mark) == 0);
 
     // post-commit: stuff access stamps for reads; init new versions
     auto clsn = xc->end;
-    for (auto &w : write_set) {
+    fat_ptr clsn_ptr = LSN::make(clsn, 0).to_log_ptr();
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+        auto &w = (*write_set)[i];
         dbtuple *tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
             continue;
@@ -502,10 +594,10 @@ transaction::parallel_ssn_commit()
             ASSERT(XID::from_ptr(next_tuple->sstamp) == xid);
             volatile_write(next_tuple->sstamp, LSN::make(my_sstamp, 0).to_log_ptr());
             ASSERT(next_tuple->sstamp.asi_type() == fat_ptr::ASI_LOG);
-            next_tuple->welcome_readers();
+            next_tuple->welcome_read_mostly_tx();
         }
         volatile_write(tuple->xstamp, cstamp);
-        volatile_write(tuple->get_object()->_clsn, clsn.to_log_ptr());
+        volatile_write(tuple->get_object()->_clsn, clsn_ptr);
         ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one CAS per tx
@@ -519,6 +611,7 @@ transaction::parallel_ssn_commit()
     // 2. My cstamp is valid and stable, can be used by
     //    conflicting readers as their sstamp or by conflicting
     //    writers as their pstamp.
+    COMPILER_MEMORY_FENCE;
     volatile_write(xc->state, TXN_CMMTD);
 
     // The availability of xtamp, solely depends on when
@@ -529,7 +622,8 @@ transaction::parallel_ssn_commit()
     // 3. Deregister from bitmap
     // Without 1, the updater might see a larger-than-it-should
     // xstamp and use it as its pstamp -> more unnecessary aborts
-    for (auto &r : read_set) {
+    for (uint32_t i = 0; i < read_set->size(); ++i) {
+        auto &r = (*read_set)[i];
         ASSERT(r->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
 
         // Spin to hold this position until the older successor is gone,
@@ -540,7 +634,7 @@ transaction::parallel_ssn_commit()
             if (oxid != this->xid) {    // exclude myself
                 xid_context *ox = xid_get_context(oxid);
                 if (ox) {
-                    auto ox_end = volatile_read(ox->end).offset();
+                    auto ox_end = volatile_read(ox->end);
                     auto ox_owner = volatile_read(ox->owner);
                     if (ox_owner == oxid and ox_end and ox_end < cstamp)
                         spin_for_cstamp(oxid, ox);
@@ -571,7 +665,7 @@ transaction::parallel_ssn_commit()
 
     return rc_t{RC_TRUE};
 }
-#elif defined(USE_PARALLEL_SSI)
+#elif defined(SSI)
 rc_t
 transaction::parallel_ssi_commit()
 {
@@ -633,20 +727,26 @@ transaction::parallel_ssi_commit()
     //  because the reader won't remove itself from the bitmap unless it updated
     //  v.xstamp.
 
-    auto cstamp = xc->end.offset();
+    auto cstamp = xc->end;
 
     // get the smallest s1 in each tuple we have read (ie, the smallest cstamp
     // of T3 in the dangerous structure that clobbered our read)
     uint64_t ct3 = xc->ct3;   // this will be the s2 of versions I clobbered
 
-    for (auto &r : read_set) {
+    for (uint32_t i = 0; i < read_set->size(); ++i) {
+        auto &r = (*read_set)[i];
     get_overwriter:
         fat_ptr overwriter_clsn = volatile_read(r->sstamp);
         if (overwriter_clsn == NULL_PTR)
             continue;
 
         uint64_t tuple_s1 = 0;
-        if (overwriter_clsn.asi_type() == fat_ptr::ASI_XID) {
+        if (overwriter_clsn.asi_type() == fat_ptr::ASI_LOG) {
+            // already committed, read tuple's sstamp
+            ALWAYS_ASSERT(overwriter_clsn.asi_type() == fat_ptr::ASI_LOG);
+            tuple_s1 = volatile_read(overwriter_clsn).offset();
+        } else {
+            ALWAYS_ASSERT(overwriter_clsn.asi_type() == fat_ptr::ASI_XID);
             XID ox = XID::from_ptr(overwriter_clsn);
             if (ox == xc->owner)    // myself
                 continue;
@@ -654,24 +754,57 @@ transaction::parallel_ssi_commit()
             xid_context *overwriter_xc = xid_get_context(ox);
             if (not overwriter_xc)
                 goto get_overwriter;
-            // read what i need before verifying ownership
-            uint64_t overwriter_end = volatile_read(overwriter_xc->end).offset();
-            if (volatile_read(overwriter_xc->owner) != ox)
+
+            // A race exists between me and the overwriter (similar to that in SSN):
+            // a transaction must transition to COMMITTING state before setting its
+            // cstamp, and I must read overwriter's state first, before looking at
+            // its cstamp; otherwise if I look at overwriter's cstamp directly, I
+            // might miss overwriterwho actually have a smaller cstamp - obtaining
+            // a cstamp and storing it in xc->end are not done atomically in a single
+            // instruction. So here start with reading overwriter's state.
+
+            // Must obtain the overwriter's status first then check ownership
+            auto overwriter_state = volatile_read(overwriter_xc->state);
+            if (not overwriter_xc->verify_owner(ox)) {
                 goto get_overwriter;
+            }
+
+            if (overwriter_state == TXN_ACTIVE) {
+                // successor really still hasn't entered pre-commit, skip
+                continue;
+            }
+            uint64_t overwriter_end = 0;
+            bool should_continue = false;
+            while (overwriter_end == 0) {
+                auto s = volatile_read(overwriter_xc->end);
+                overwriter_state = volatile_read(overwriter_xc->state);
+                if (not overwriter_xc->verify_owner(ox)) {
+                    goto get_overwriter;
+                }
+                if (overwriter_state == TXN_ABRTD) {
+                    should_continue = true;
+                    break;
+                }
+                overwriter_end = s;
+            }
+            if (should_continue) {
+                continue;
+            }
+            ALWAYS_ASSERT(overwriter_end);
+            ALWAYS_ASSERT(overwriter_end != cstamp);
+            if (overwriter_end > cstamp) {
+                continue;
+            }
             // Spin if the overwriter entered precommit before me: need to
             // find out the final sstamp value.
             // => the updater maybe doesn't know my existence and commit.
-            if (overwriter_end and overwriter_end < cstamp) {
-                auto cr = spin_for_cstamp(ox, overwriter_xc);
-                if (cr == TXN_INVALID)  // context change, retry
-                    goto get_overwriter;
-                else if (cr == TXN_CMMTD)
-                    tuple_s1 = overwriter_end;
+            if (overwriter_state == TXN_COMMITTING) {
+                overwriter_state = spin_for_cstamp(ox, overwriter_xc);
             }
-        }
-        else {    // already committed, read tuple's sstamp
-            ASSERT(overwriter_clsn.asi_type() == fat_ptr::ASI_LOG);
-            tuple_s1 = volatile_read(overwriter_clsn).offset();
+            if (overwriter_state == TXN_INVALID)  // context change, retry
+                goto get_overwriter;
+            else if (overwriter_state == TXN_CMMTD)
+                tuple_s1 = overwriter_end;
         }
 
         if (tuple_s1 and (not ct3 or ct3 > tuple_s1))
@@ -680,6 +813,7 @@ transaction::parallel_ssi_commit()
         // Now the updater (if exists) should've already concluded and stamped
         // s2 - requires updater to change state to CMMTD only after setting
         // all s2 values.
+        COMPILER_MEMORY_FENCE;
         if (volatile_read(r->s2))
             return {RC_ABORT_SERIAL};
         // Release read lock (readers bitmap) after setting xstamp in post-commit
@@ -687,18 +821,13 @@ transaction::parallel_ssi_commit()
 
     if (ct3) {
         // now see if I'm the unlucky T2
-        for (auto &w : write_set) {
+        for (uint32_t i = 0; i < write_set->size(); ++i) {
+            auto &w = (*write_set)[i];
             if (w.get_object()->tuple()->is_defunct())
                 continue;
             dbtuple *overwritten_tuple = w.get_object()->tuple()->next();
             if (not overwritten_tuple)
                 continue;
-
-            // Check xstamp before continue to examine concurrent readers,
-            // in case there is no concurrent readers (or they all have left
-            // at this point).
-            if (volatile_read(overwritten_tuple->xstamp) >= ct3)
-                return {RC_ABORT_SERIAL};
 
             // Note: the bits representing readers that will commit **after**
             // me are stable; those representing readers older than my cstamp
@@ -717,19 +846,20 @@ transaction::parallel_ssi_commit()
                 if (rxid == INVALID_XID)
                     continue;
 
-                XID reader_owner = INVALID_XID;
                 uint64_t reader_end = 0;
+                auto reader_state = TXN_ACTIVE;
                 xid_context *reader_xc = NULL;
                 if (rxid._val) {
                     reader_xc = xid_get_context(rxid);
                     if (reader_xc) {
                         // copy everything before doing anything
-                        reader_end = volatile_read(reader_xc->end).offset();
-                        reader_owner = volatile_read(reader_xc->owner);
+                        reader_state = volatile_read(reader_xc->state);
+                        reader_end = volatile_read(reader_xc->end);
                     }
                 }
 
-                if (not rxid._val or not reader_xc or reader_owner != rxid) {
+                if (not rxid._val or not reader_xc or not reader_xc->verify_owner(rxid)) {
+                context_change:
                     // Context change: The guy I saw on the bitmap is gone - it
                     // must had a cstamp older than mine (otherwise it couldn't
                     // go away before me), or given up even before entered pre-
@@ -742,45 +872,66 @@ transaction::parallel_ssi_commit()
                     // xstamp might still be 0 - if the reader aborted
                     if (tuple_xstamp >= ct3)
                         return {RC_ABORT_SERIAL};
-                }
-                else if (not reader_end) {
-                    ASSERT(rxid == reader_owner);
-                    // Reader not in precommit yet, and not sure if it is likely
-                    // to commit. But aborting the pivot is easier here, so we
-                    // just abort (betting the reader is likely to succeed).
-                    //
-                    // Another way is don't do anything here, reader will notice
-                    // my presence or my legacy (sstamp on the version) once
-                    // entered precommit; this might cause deadlock tho.
-                    return {RC_ABORT_SERIAL};
-                }
-                else if (reader_end < cstamp) {
-                    ASSERT(ct3);
-                    // This reader_end will be the version's xstamp if it committed
-                    if (reader_end >= ct3) {
-                        auto cr = spin_for_cstamp(rxid, reader_xc);
-                        if (cr == TXN_CMMTD)
-                            return {RC_ABORT_SERIAL};
-                        else if (cr == TXN_INVALID) {
-                            // Context change, no clue if the reader committed
-                            // or aborted, read tuple's xstamp - the same
-                            // reasoning as in SSN
-                            if (volatile_read(overwritten_tuple->xstamp) >= ct3)
-                                return {RC_ABORT_SERIAL};
+                } else {
+                    bool should_continue = false;
+                    if (reader_state != TXN_ACTIVE and not reader_end) {
+                        while (not reader_end) {
+                            auto r = volatile_read(reader_xc->end);
+                            reader_state = volatile_read(reader_xc->state);
+                            if (not reader_xc->verify_owner(rxid)) {
+                                goto context_change;
+                            }
+                            if (reader_state == TXN_ABRTD) {
+                                should_continue = true;
+                                break;
+                            }
+                            reader_end = r;
                         }
-                    }   // otherwise it's worth the spin - won't use it anyway
-                }
-                else {
-                    // Reader will commit after me, ie its cstamp will be > ct3
-                    // (b/c ct3 is the first committed in the dangerous structure)
-                    // and will not release its seat in the bitmap until I'm gone
-                    return {RC_ABORT_SERIAL};
+                    }
+                    if (should_continue) {  // reader aborted
+                        continue;
+                    }
+                    if (reader_state == TXN_ACTIVE or not reader_end) {
+                        // Reader not in precommit yet, and not sure if it is likely
+                        // to commit. But aborting the pivot is easier here, so we
+                        // just abort (betting the reader is likely to succeed).
+                        //
+                        // Another way is don't do anything here, reader will notice
+                        // my presence or my legacy (sstamp on the version) once
+                        // entered precommit; this might cause deadlock tho.
+                        return {RC_ABORT_SERIAL};
+                    }
+                    else if (reader_end < cstamp) {
+                        ASSERT(ct3);
+                        // This reader_end will be the version's xstamp if it committed
+                        if (reader_end >= ct3) {
+                            auto cr = spin_for_cstamp(rxid, reader_xc);
+                            if (cr == TXN_CMMTD)
+                                return {RC_ABORT_SERIAL};
+                            else if (cr == TXN_INVALID) {
+                                // Context change, no clue if the reader committed
+                                // or aborted, read tuple's xstamp - the same
+                                // reasoning as in SSN
+                                if (volatile_read(overwritten_tuple->xstamp) >= ct3)
+                                    return {RC_ABORT_SERIAL};
+                            }
+                        }   // otherwise it's worth the spin - won't use it anyway
+                    }
+                    else {
+                        // Reader will commit after me, ie its cstamp will be > ct3
+                        // (b/c ct3 is the first committed in the dangerous structure)
+                        // and will not release its seat in the bitmap until I'm gone
+                        return {RC_ABORT_SERIAL};
+                    }
                 }
             }
+            // Check xstamp in case in-flight readers left or there was no reader
+            if (volatile_read(overwritten_tuple->xstamp) >= ct3)
+                return {RC_ABORT_SERIAL};
         }
     }
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     if (not check_phantom())
         return rc_t{RC_ABORT_PHANTOM};
 #endif
@@ -788,25 +939,27 @@ transaction::parallel_ssi_commit()
     // survived!
     log->commit(NULL);
 
+    fat_ptr clsn_ptr = LSN::make(cstamp, 0).to_log_ptr();
     // stamp overwritten versions, stuff clsn
     auto clsn = xc->end;
-    for (auto &w : write_set) {
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+        auto &w = (*write_set)[i];
         dbtuple* tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
             continue;
         tuple->do_write();
         dbtuple *overwritten_tuple = tuple->next();
         if (overwritten_tuple) {    // update
+            ASSERT(not overwritten_tuple->s2);
+            // Must set s2 first, before setting clsn
+            volatile_write(overwritten_tuple->s2, ct3);
+            COMPILER_MEMORY_FENCE;
             ASSERT(XID::from_ptr(volatile_read(overwritten_tuple->sstamp)) == xid);
-            volatile_write(overwritten_tuple->sstamp, LSN::make(cstamp, 0).to_log_ptr());
-            if (ct3) {
-                ASSERT(not overwritten_tuple->s2);
-                volatile_write(overwritten_tuple->s2, ct3);
-            }
+            volatile_write(overwritten_tuple->sstamp, clsn_ptr);
         }
         volatile_write(tuple->xstamp, cstamp);
-        volatile_write(tuple->get_object()->_clsn, clsn.to_log_ptr());
-        INVARIANT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
+        volatile_write(tuple->get_object()->_clsn, clsn_ptr);
+        ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one XCHG per tx
             enqueue_recycle_oids(w);
@@ -819,12 +972,14 @@ transaction::parallel_ssi_commit()
     //
     // This needs to happen after setting overwritten tuples' s2, b/c
     // the reader needs to check this during pre-commit.
+    COMPILER_MEMORY_FENCE;
     volatile_write(xc->state, TXN_CMMTD);
 
     // Similar to SSN implementation, xstamp's availability depends solely
     // on when to deregister_reader_tx, not when to transitioning to the
     // "committed" state.
-    for (auto &r : read_set) {
+    for (uint32_t i = 0; i < read_set->size(); ++i) {
+        auto &r = (*read_set)[i];
         // Update xstamps in read versions, this should happen before
         // deregistering from the bitmap, so when the updater found a
         // context change, it'll get a stable xtamp from the tuple.
@@ -849,15 +1004,15 @@ transaction::parallel_ssi_commit()
             if (oxid != this->xid) {    // exclude myself
                 xid_context *ox = xid_get_context(oxid);
                 if (ox) {
-                    auto ox_end = volatile_read(ox->end).offset();
-                    auto ox_owner = volatile_read(ox->owner);
-                    if (ox_owner == oxid and ox_end and ox_end < cstamp)
+                    auto ox_end = volatile_read(ox->end);
+                    if (ox->verify_owner(oxid) and ox_end and ox_end < cstamp)
                         spin_for_cstamp(oxid, ox);
                 }
                 // if !ox or ox_owner != oxid then the guy is
                 // already gone, don't bother
             }
         }
+        COMPILER_MEMORY_FENCE;
         // now it's safe to release my seat!
         // Need to do this after setting xstamp, so that the updater can
         // see the xstamp if it didn't find the bit in the bitmap is set.
@@ -879,11 +1034,11 @@ transaction::si_commit()
 {
     ASSERT(log);
     // get clsn, abort if failed
-    xc->end = log->pre_commit();
-    if (xc->end == INVALID_LSN)
+    xc->end = log->pre_commit().offset();
+    if (xc->end == 0)
         return rc_t{RC_ABORT_INTERNAL};
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     if (not check_phantom())
         return rc_t{RC_ABORT_PHANTOM};
 #endif
@@ -894,19 +1049,21 @@ transaction::si_commit()
     // (traverse write-tuple)
     // stuff clsn in tuples in write-set
     auto clsn = xc->end;
-    for (auto &w : write_set) {
+    fat_ptr clsn_ptr = LSN::make(clsn, 0).to_log_ptr();
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+        auto &w = (*write_set)[i];
         dbtuple* tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
             continue;
         ASSERT(w.oa);
         tuple->do_write();
-        tuple->get_object()->_clsn = clsn.to_log_ptr();
-        INVARIANT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
+        tuple->get_object()->_clsn = clsn_ptr;
+        ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one XCHG per tx
             enqueue_recycle_oids(w);
         }
-#if CHECK_INVARIANT
+#ifndef NDEBUG
         object *obj = tuple->get_object();
         fat_ptr pdest = volatile_read(obj->_pdest);
         ASSERT((pdest == NULL_PTR and not tuple->size) or
@@ -929,7 +1086,7 @@ transaction::si_commit()
 }
 #endif
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
 // returns true if btree versions have changed, ie there's phantom
 bool
 transaction::check_phantom()
@@ -950,41 +1107,40 @@ transaction::try_insert_new_tuple(
     const varstr *value,
     FID fid)
 {
-    INVARIANT(key);
+    ASSERT(key);
     fat_ptr new_head = object::create_tuple_object(value, false, xc->begin_epoch);
     ASSERT(new_head.size_code() != INVALID_SIZE_CODE);
     dbtuple *tuple = ((object *)new_head.offset())->tuple();
     ASSERT(decode_size_aligned(new_head.size_code()) >= tuple->size);
     tuple->get_object()->_clsn = xid.to_ptr();
     OID oid = oidmgr->alloc_oid(fid);
-    oidmgr->oid_put_new(btr->tuple_vec(), oid, new_head);
+    oidmgr->oid_put_new(btr->get_oid_array(), oid, new_head);
     typename concurrent_btree::insert_info_t ins_info;
     if (unlikely(!btr->insert_if_absent(varkey(key), oid, tuple, xc, &ins_info))) {
-        oidmgr->oid_unlink(btr->tuple_vec(), oid, tuple);
+        oidmgr->oid_unlink(btr->get_oid_array(), oid, tuple);
         return false;
     }
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     // update node #s
-    INVARIANT(ins_info.node);
+    ASSERT(ins_info.node);
     if (!absent_set.empty()) {
         auto it = absent_set.find(ins_info.node);
         if (it != absent_set.end()) {
             if (unlikely(it->second.version != ins_info.old_version)) {
                 // important: unlink the version, otherwise we risk leaving a dead
                 // version at chain head -> infinite loop or segfault...
-                oidmgr->oid_unlink(btr->tuple_vec(), oid, tuple);
+                oidmgr->oid_unlink(btr->get_oid_array(), oid, tuple);
                 return false;
             }
             // otherwise, bump the version
             it->second.version = ins_info.new_version;
-            SINGLE_THREADED_INVARIANT(concurrent_btree::ExtractVersionNumber(it->first) == it->second);
         }
     }
 #endif
 
     // insert to log
-    INVARIANT(log);
+    ASSERT(log);
     ASSERT(tuple->size == value->size());
     auto record_size = align_up((size_t)tuple->size) + sizeof(varstr);
     auto size_code = encode_size_aligned(record_size);
@@ -1007,26 +1163,26 @@ transaction::try_insert_new_tuple(
 
     // update write_set
     ASSERT(tuple->pvalue->size() == tuple->size);
-    add_to_write_set(new_head, btr->tuple_vec(), oid);
+    add_to_write_set(new_head, btr->get_oid_array(), oid);
     return true;
 }
 
 rc_t
 transaction::do_tuple_read(dbtuple *tuple, value_reader &value_reader)
 {
-    INVARIANT(tuple);
+    ASSERT(tuple);
     ASSERT(xc);
     bool read_my_own = (tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_XID);
     ASSERT(not read_my_own or (read_my_own and XID::from_ptr(volatile_read(tuple->get_object()->_clsn)) == xc->owner));
     ASSERT(not read_my_own or not(flags & TXN_FLAG_READ_ONLY));
 
-#if defined(USE_PARALLEL_SSI) || defined(USE_PARALLEL_SSN)
+#if defined(SSI) || defined(SSN)
     if (not read_my_own) {
         rc_t rc = {RC_INVALID};
         if (sysconf::enable_safesnap and (flags & TXN_FLAG_READ_ONLY))
             rc = {RC_TRUE};
         else {
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
             rc = ssn_read(tuple);
 #else
             rc = ssi_read(tuple);
@@ -1045,7 +1201,7 @@ transaction::do_tuple_read(dbtuple *tuple, value_reader &value_reader)
         if (unlikely(stat == dbtuple::READ_FAILED))
             return rc_t{RC_ABORT_INTERNAL};
     }
-    INVARIANT(stat == dbtuple::READ_EMPTY || stat == dbtuple::READ_RECORD);
+    ASSERT(stat == dbtuple::READ_EMPTY || stat == dbtuple::READ_RECORD);
     if (stat == dbtuple::READ_EMPTY) {
         return rc_t{RC_FALSE};
     }
@@ -1053,12 +1209,12 @@ transaction::do_tuple_read(dbtuple *tuple, value_reader &value_reader)
     return {RC_TRUE};
 }
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
 rc_t
 transaction::do_node_read(
     const typename concurrent_btree::node_opaque_t *n, uint64_t v)
 {
-    INVARIANT(n);
+    ASSERT(n);
     auto it = absent_set.find(n);
     if (it == absent_set.end())
         absent_set[n].version = v;
@@ -1068,7 +1224,7 @@ transaction::do_node_read(
 }
 #endif
 
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
 rc_t
 transaction::ssn_read(dbtuple *tuple)
 {
@@ -1083,7 +1239,7 @@ transaction::ssn_read(dbtuple *tuple)
     auto tuple_sstamp = volatile_read(tuple->sstamp);
     if (tuple_sstamp.asi_type() == fat_ptr::ASI_LOG) {
         // have committed overwrite
-        if (xc->sstamp > tuple_sstamp.offset())
+        if (xc->sstamp > tuple_sstamp.offset() or xc->sstamp == 0)
             xc->sstamp = tuple_sstamp.offset(); // \pi
     }
     else {
@@ -1095,11 +1251,16 @@ transaction::ssn_read(dbtuple *tuple)
         // If there's no (committed) overwrite so far, we need to track this read,
         // unless it's an old version.
         ASSERT(tuple_sstamp == NULL_PTR or XID::from_ptr(tuple_sstamp) != xc->owner);
-        serial_register_reader_tx(xc->owner, &tuple->readers_bitmap);
         if (tuple->is_old(xc)) {
             ASSERT(is_read_mostly());
-            if (not tuple->set_persistent_reader())
-                return {RC_ABORT_RW_CONFLICT};
+            // Aborting long read-mostly transactions is expensive, spin first
+            static const uint32_t kSpins = 100000;
+            uint32_t spins = 0;
+            while (not tuple->set_persistent_reader()) {
+                if (++spins >= kSpins) {
+                    return {RC_ABORT_RW_CONFLICT};
+                }
+            }
         }
         else {
             // Now if this tuple was overwritten by somebody, this means if I read
@@ -1108,11 +1269,12 @@ transaction::ssn_read(dbtuple *tuple)
             // successor of mine), so I need to update my \pi for the SSN check.
             // This is the easier case of anti-dependency (the other case is T1
             // already read a (then latest) version, then T2 comes to overwrite it).
-            read_set.emplace_back(tuple);
+            read_set->emplace_back(tuple);
         }
+        serial_register_reader_tx(xc->owner, &tuple->readers_bitmap);
     }
 
-#ifdef DO_EARLY_SSN_CHECKS
+#ifdef EARLY_SSN_CHECK
     if (not ssn_check_exclusion(xc))
         return {RC_ABORT_SERIAL};
 #endif
@@ -1120,7 +1282,7 @@ transaction::ssn_read(dbtuple *tuple)
 }
 #endif
 
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
 rc_t
 transaction::ssi_read(dbtuple *tuple)
 {
@@ -1131,8 +1293,9 @@ transaction::ssi_read(dbtuple *tuple)
     if (volatile_read(tuple->s2)) {
         // Read-only optimization: s2 is not a problem if we're read-only and
         // my begin ts is earlier than s2.
-        if (not ((sysconf::enable_ssi_read_only_opt and write_set.size() == 0) and
-                 xc->begin.offset() < tuple->s2)) {
+        if (not sysconf::enable_ssi_read_only_opt or
+            write_set->size() > 0 or
+            xc->begin >= tuple->s2) {
             // sstamp will be valid too if s2 is valid
             ASSERT(tuple->sstamp.asi_type() == fat_ptr::ASI_LOG);
             return rc_t{RC_ABORT_SERIAL};
@@ -1159,7 +1322,7 @@ transaction::ssi_read(dbtuple *tuple)
         // survived, register as a reader
         // After this point, I'll be visible to the updater (if any)
         serial_register_reader_tx(xc->owner, &tuple->readers_bitmap);
-        read_set.emplace_back(tuple);
+        read_set->emplace_back(tuple);
     }
     return {RC_TRUE};
 }

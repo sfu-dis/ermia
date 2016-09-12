@@ -1,18 +1,21 @@
-#include "../util.h"
-#include "sm-oid-impl.h"
-#include "sm-alloc.h"
-#include "sm-chkpt.h"
-#include "sm-config.h"
-#include "sc-hash.h"
-#include "burt-hash.h"
-#include "../txn.h"
-#include <map>
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <map>
+
+#include "../util.h"
+#include "../txn.h"
+
+#include "burt-hash.h"
+#include "sc-hash.h"
+#include "sm-alloc.h"
+#include "sm-chkpt.h"
+#include "sm-config.h"
+#include "sm-file.h"
+#include "sm-log-recover-impl.h"
+#include "sm-oid-impl.h"
+
 sm_oid_mgr *oidmgr = NULL;
-// maps table name to its fid
-std::unordered_map<std::string, std::pair<FID, ndb_ordered_index *> > fid_map;
 
 namespace {
 #if 0
@@ -231,7 +234,7 @@ sm_oid_mgr_impl::sm_oid_mgr_impl()
        itself). Then seed it with OID arrays for allocators and
        metadata
      */
-#warning TODO DEFER deletion of these arrays if constructor throws
+    // TODO: DEFER deletion of these arrays if constructor throws
     fat_ptr ptr = oid_array::make();
     files = ptr;
     *files->get(OBJARRAY_FID) = ptr;
@@ -336,6 +339,11 @@ sm_oid_mgr_impl::recreate_file(FID f)
 void
 sm_oid_mgr_impl::recreate_allocator(FID f, OID m)
 {
+    static std::mutex recreate_lock;
+
+    recreate_lock.lock();
+    DEFER(recreate_lock.unlock());
+
     // Callers might be
     // 1. oidmgr when recovering from a chkpt
     // 2. logmgr when recovering from the log
@@ -424,7 +432,7 @@ sm_oid_mgr_impl::destroy_file(FID f)
             *ptr = NULL_PTR;
         }
     }
-#warning TODO: delete metadata? or force caller to do it before now?
+    // TODO: delete metadata? or force caller to do it before now?
 
     // one allocator controls all three files
     thread_free(this, OBJARRAY_FID, f);
@@ -440,7 +448,7 @@ sm_oid_mgr_impl::oid_access(FID f, OID o)
 sm_allocator*
 sm_oid_mgr_impl::get_allocator(FID f)
 {
-#warning TODO: allow allocators to be paged out
+    // TODO: allow allocators to be paged out
     sm_allocator *alloc = oid_get(ALLOCATOR_FID, f);
     THROW_IF(not alloc, illegal_argument,
              "No allocator for FID %d", f);
@@ -450,7 +458,7 @@ sm_oid_mgr_impl::get_allocator(FID f)
 oid_array*
 sm_oid_mgr_impl::get_array(FID f)
 {
-#warning TODO: allow allocators to be paged out
+    // TODO: allow allocators to be paged out
     oid_array *oa = *files->get(f);
     THROW_IF(not oa, illegal_argument,
              "No such file: %d", f);
@@ -523,7 +531,9 @@ sm_oid_mgr::create(LSN chkpt_start, sm_log_recover_mgr *lm)
         n = read(fd, &f, sizeof(FID));
 
         // Recover fid_map and recreate the empty file
-        fid_map.emplace(name, std::make_pair(f, (ndb_ordered_index *)NULL));
+        ASSERT(sm_file_mgr::get_index(name));
+        sm_file_mgr::name_map[name]->fid = f;
+        sm_file_mgr::fid_map[f] = new sm_file_descriptor(f, name, sm_file_mgr::get_index(name));
         ASSERT(not oidmgr->file_exists(f));
         oidmgr->recreate_file(f);
         printf("[Recovery.chkpt] FID=%d %s\n", f, name.c_str());
@@ -542,7 +552,7 @@ sm_oid_mgr::create(LSN chkpt_start, sm_log_recover_mgr *lm)
 
             fat_ptr ptr = NULL_PTR;
             n = read(fd, &ptr, sizeof(fat_ptr));
-            if (sm_log::warm_up == sm_log::WU_EAGER) {
+            if (sysconf::eager_warm_up()) {
                 ptr = object::create_tuple_object(ptr, NULL_PTR, 0, lm);
                 ASSERT(ptr.asi_type() == 0);
             }
@@ -575,8 +585,9 @@ sm_oid_mgr::take_chkpt(LSN cstart)
     //
     // The table's himark denotes its start and end
 
-    for (auto &fm : fid_map) {
-        FID fid = fm.second.first;
+    for (auto &fm : sm_file_mgr::fid_map) {
+        auto* fd = fm.second;
+        FID fid = fd->fid;
         // Find the high watermark of this file and dump its
         // backing store up to the size of the high watermark
         auto *alloc = get_impl(this)->get_allocator(fid);
@@ -586,10 +597,10 @@ sm_oid_mgr::take_chkpt(LSN cstart)
         chkptmgr->write_buffer(&himark, sizeof(OID));
 
         // [Name length, name, FID]
-        size_t len = fm.first.length();
+        size_t len = fd->name.length();
         chkptmgr->write_buffer(&len, sizeof(size_t));
-        chkptmgr->write_buffer((void *)fm.first.c_str(), len);
-        chkptmgr->write_buffer(&fm.second.first, sizeof(FID));
+        chkptmgr->write_buffer((void *)fd->name.c_str(), len);
+        chkptmgr->write_buffer(&fd->fid, sizeof(FID));
 
         // Now write the [OID, ptr] pairs
         for (OID oid = 0; oid < himark; oid++) {
@@ -619,7 +630,7 @@ sm_oid_mgr::take_chkpt(LSN cstart)
         }
         // Write himark as end of fid
         chkptmgr->write_buffer(&himark, sizeof(OID));
-        std::cout << "[Checkpoint] FID(" << fm.first << ") = "
+        std::cout << "[Checkpoint] FID(" << fd->fid << ") = "
                   << fid << ", himark = " << himark << std::endl;
     }
 
@@ -647,11 +658,11 @@ sm_oid_mgr::warm_up()
     {
         util::scoped_timer t("data warm-up");
         // Go over each OID entry and ensure_tuple there
-        for (auto &fm : fid_map) {
-            auto fid = fm.second.first;
-            auto *alloc = oidmgr->get_allocator(fid);
+        for (auto &fm : sm_file_mgr::fid_map) {
+            auto* fd = fm.second;
+            auto *alloc = oidmgr->get_allocator(fd->fid);
             OID himark = alloc->head.hiwater_mark;
-            oid_array *oa = oidmgr->get_array(fid);
+            oid_array *oa = oidmgr->get_array(fd->fid);
             for (OID oid = 0; oid < himark; oid++)
                 oidmgr->ensure_tuple(oa, oid, 0);
         }
@@ -790,7 +801,7 @@ sm_oid_mgr::oid_put_update(oid_array *oa,
                            xid_context *updater_xc,
                            fat_ptr *new_obj_ptr)
 {
-#if CHECK_INVARIANTS
+#ifndef NDEBUG
     int attempts = 0;
 #endif
     auto *ptr = ensure_tuple(oa, o, updater_xc->begin_epoch);
@@ -830,20 +841,20 @@ start_over:
 
         xid_context *holder= xid_get_context(holder_xid);
         if (not holder) {
-#if CHECK_INVARIANTS
+#ifndef NDEBUG
             auto t = volatile_read(old_desc->_clsn).asi_type();
             ASSERT(t == fat_ptr::ASI_LOG or oid_get(oa, o) != head);
 #endif
             goto start_over;
         }
-        INVARIANT(holder);
+        ASSERT(holder);
         auto state = volatile_read(holder->state);
         auto owner = volatile_read(holder->owner);
         holder = NULL; // use cached values instead!
 
         // context still valid for this XID?
         if (unlikely(owner != holder_xid)) {
-#if CHECK_INVARIANTS
+#ifndef NDEBUG
             ASSERT(attempts < 2);
             attempts++;
 #endif
@@ -864,11 +875,11 @@ start_over:
     // check dirty writes
     else {
         ASSERT(clsn.asi_type() == fat_ptr::ASI_LOG );
-#ifndef USE_READ_COMMITTED
+#ifndef RC
         // First updater wins: if some concurrent tx committed first,
         // I have to abort. Same as in Oracle. Otherwise it's an isolation
         // failure: I can modify concurrent transaction's writes.
-        if (LSN::from_ptr(clsn) > updater_xc->begin)
+        if (LSN::from_ptr(clsn).offset() >= updater_xc->begin)
             return NULL_PTR;
 #endif
         goto install;
@@ -1011,7 +1022,7 @@ start_over:
             goto start_over;
         }
 
-        ASSERT(clsn.asi_type() == fat_ptr::ASI_XID or clsn.asi_type() == fat_ptr::ASI_LOG);
+        ALWAYS_ASSERT(clsn.asi_type() == fat_ptr::ASI_XID or clsn.asi_type() == fat_ptr::ASI_LOG);
         // xid tracking & status check
         if (clsn.asi_type() == fat_ptr::ASI_XID) {
             /* Same as above: grab and verify XID context,
@@ -1024,7 +1035,7 @@ start_over:
                 ASSERT(not cur_obj->_next.offset() or ((object *)cur_obj->_next.offset())->_clsn.asi_type() == fat_ptr::ASI_LOG);
                 return cur_obj->tuple();
             }
-            xid_context *holder = xid_get_context(holder_xid);
+            auto* holder = xid_get_context(holder_xid);
             if (not holder) // invalid XID (dead tuple, must retry than goto next in the chain)
                 goto start_over;
 
@@ -1036,64 +1047,59 @@ start_over:
                 goto start_over;
 
             if (state == TXN_CMMTD) {
-                ASSERT(volatile_read(holder->end).offset());
+                ASSERT(volatile_read(holder->end));
                 ASSERT(owner == holder_xid);
-#ifdef USE_READ_COMMITTED
-#if defined(USE_PARALLEL_SSI) || defined(USE_PARALLEL_SSN)
+#if defined(RC) || defined(RC_SPIN)
+#ifdef SSN
                 if (sysconf::enable_safesnap and visitor_xc->xct->flags & transaction::TXN_FLAG_READ_ONLY) {
-                    if (holder->end < visitor_xc->begin)
+                    if (holder->end < visitor_xc->begin) {
                         return cur_obj->tuple();
+                    }
                 }
                 else {
                     return cur_obj->tuple();
                 }
-#else
+#else  // SSN
                 return cur_obj->tuple();
-#endif
-#else
+#endif  // SSN
+#else  // not RC/RC_SPIN
                 if (holder->end < visitor_xc->begin) {
                     return cur_obj->tuple();
-                }
-#if defined(USE_PARALLEL_SSI) or defined(USE_PARALLEL_SSN)
-                else {
-                    oid_check_phantom(visitor_xc, holder->end.offset());
+                } else {
+                    oid_check_phantom(visitor_xc, holder->end);
                 }
 #endif
-#endif
-            }
-#ifdef READ_COMMITTED_SPIN
-            else {
+            } else {
+#ifdef RC_SPIN
                 // spin until the tx is settled (either aborted or committed)
-                if (wait_for_commit_result(holder))
+                if (spin_for_cstamp(holder_xid, holder) == TXN_CMMTD) {
                     return cur_obj->tuple();
-            }
+                }
 #endif
+            }
         }
         else if (clsn.asi_type() == fat_ptr::ASI_LOG) {
-#ifdef USE_READ_COMMITTED
-#if defined(USE_PARALLEL_SSI) || defined(USE_PARALLEL_SSN)
+#if defined(RC) || defined(RC_SPIN)
+#if defined(SSN)
             if (sysconf::enable_safesnap and visitor_xc->xct->flags & transaction::TXN_FLAG_READ_ONLY) {
-                if (LSN::from_ptr(clsn) <= visitor_xc->begin)
+                if (LSN::from_ptr(clsn).offset() <= visitor_xc->begin) {
                     return cur_obj->tuple();
-            }
-            else
+                } else {
+                    oid_check_phantom(visitor_xc, clsn.offset());
+                }
+            } else {
                 return cur_obj->tuple();
+            }
 #else
             return cur_obj->tuple();
 #endif
-#else
-            if (LSN::from_ptr(clsn) <= visitor_xc->begin) {
+#else  // Not RC
+            if (LSN::from_ptr(clsn).offset() <= visitor_xc->begin) {
                 return cur_obj->tuple();
-            }
-#if defined(USE_PARALLEL_SSI) or defined(USE_PARALLEL_SSN)
-            else {
+            } else {
                 oid_check_phantom(visitor_xc, clsn.offset());
             }
 #endif
-#endif
-        }
-        else {
-            ALWAYS_ASSERT(false);
         }
     }
 
@@ -1102,6 +1108,7 @@ start_over:
 
 void
 sm_oid_mgr::oid_check_phantom(xid_context *visitor_xc, uint64_t vcstamp) {
+#if defined(PHANTOM_PROT) && (defined(SSI) || defined(SSN))
   /*
    * tzwang (May 05, 2016): Preventing phantom:
    * Consider an example:
@@ -1128,15 +1135,17 @@ sm_oid_mgr::oid_check_phantom(xid_context *visitor_xc, uint64_t vcstamp) {
    * successor updated our read set. For SSI, this translates to updating
    * ct3; for SSN, update the visitor's sstamp.
    */
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
   auto vct3 = volatile_read(visitor_xc->ct3);
   if (not vct3 or vct3 > vcstamp) {
       volatile_write(visitor_xc->ct3, vcstamp);
   }
-#elif defined USE_PARALLEL_SSN
-  visitor_xc->sstamp = std::min(visitor_xc->sstamp.load(), vcstamp);
+#elif defined SSN
+  visitor_xc->set_sstamp(std::min(visitor_xc->sstamp.load(), vcstamp));
   // TODO(tzwang): do early SSN check here
-#endif  // USE_PARALLEL_SSI/SSN
+#endif  // SSI/SSN
+#else
+#endif
 }
 
 void

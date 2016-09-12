@@ -223,9 +223,12 @@ public:
     table_.destroy(ti);
   }
 
-  inline oid_array *tuple_vec()
-  {
-      return table_.tuple_vec;
+  inline oid_array *get_oid_array() {
+    return table_.get_oid_array();
+  }
+
+  inline void set_oid_array(oid_array *oa) {
+    table_.set_oid_array(oa);
   }
 
   /**
@@ -467,12 +470,6 @@ public:
   template <bool Reverse> class search_range_scanner_base;
   template <bool Reverse> class low_level_search_range_scanner;
   template <typename F> class low_level_search_range_callback_wrapper;
-
- public:
-  void set_tuple_vec(oid_array *oa)
-  {
-    table_.tuple_vec = oa;
-  }
 };
 
 template <typename P>
@@ -501,7 +498,7 @@ void mbtree<P>::tree_walk(tree_walk_callback &callback) const {
     q.pop_back();
     prefetch(cur);
     leaf_type *leaf = leftmost_descend_layer(cur);
-    INVARIANT(leaf);
+    ASSERT(leaf);
     while (leaf) {
       leaf->prefetch();
     process:
@@ -582,7 +579,7 @@ inline bool mbtree<P>::search(const key_type &k, OID &o, dbtuple* &v, xid_contex
   if (found)
   {
 	  o = lp.value();
-      v = oidmgr->oid_get_version(table_.tuple_vec, o, xc);
+      v = oidmgr->oid_get_version(table_.get_oid_array(), o, xc);
 	  if( !v )
 		  found = false;
   }
@@ -618,7 +615,12 @@ inline bool mbtree<P>::insert_if_absent(const key_type &k, OID o, dbtuple * v,
                                         xid_context *xc,
                                         insert_info_t *insert_info)
 {
-  threadinfo ti(xc->begin_epoch);
+  // Recovery will give a null xc, use epoch 0 for the memory allocated
+  epoch_num e = 0;
+  if (xc) {
+    e = xc->begin_epoch;
+  }
+  threadinfo ti(e);
   Masstree::tcursor<P> lp(table_, k.data(), k.length());
   bool found = lp.find_insert(ti);
   if (!found) {
@@ -636,7 +638,7 @@ insert_new:
   {
 	  // we have two cases: 1) predecessor's inserts are still remaining in tree, even though version chain is empty or 2) somebody else are making dirty data in this chain. If it's the first case, version chain is considered empty, then we retry insert.
 	  OID oid = lp.value();
-	  if (oidmgr->oid_get_latest_version(table_.tuple_vec, oid))
+	  if (oidmgr->oid_get_latest_version(table_.get_oid_array(), oid))
 		  found = true;
 	  else
 		  goto insert_new;
@@ -658,7 +660,7 @@ inline bool mbtree<P>::remove(const key_type &k, xid_context* xc, dbtuple * *old
   Masstree::tcursor<P> lp(table_, k.data(), k.length());
   bool found = lp.find_locked(ti);
   if (found && old_v)
-	  *old_v = oidmgr->oid_get_latest_version(table_.tuple_vec, lp.value());
+	  *old_v = oidmgr->oid_get_latest_version(table_.get_oid_array(), lp.value());
 	  // XXX. need to look at lp.finish that physically removes records in tree and hack it if necessary.
   lp.finish(found ? -1 : 0, ti);
   return found;
@@ -732,11 +734,11 @@ class mbtree<P>::low_level_search_range_callback_wrapper :
 public:
   low_level_search_range_callback_wrapper(F& callback) : callback_(callback) {}
 
-  void on_resp_node(const node_opaque_t *n, uint64_t version) OVERRIDE {}
+  void on_resp_node(const node_opaque_t *n, uint64_t version) override {}
 
   bool
   invoke(const string_type &k, OID o, dbtuple * v,
-         const node_opaque_t *n, uint64_t version) OVERRIDE
+         const node_opaque_t *n, uint64_t version) override
   {
     return callback_(k, o, v);
   }

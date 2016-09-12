@@ -2,7 +2,10 @@
 #include <numa.h>
 #include "../macros.h"
 #include "sm-config.h"
+#include "sm-log-recover-impl.h"
+#include "sm-thread.h"
 #include <iostream>
+
 uint32_t sysconf::_active_threads = 0;
 uint32_t sysconf::worker_threads = 0;
 int sysconf::numa_nodes = 0;
@@ -17,7 +20,8 @@ std::string sysconf::log_dir("");
 int sysconf::null_log_device = 0;
 int sysconf::htt_is_on= 1;
 uint64_t sysconf::node_memory_gb = 12;
-
+int sysconf::recovery_warm_up_policy = sysconf::WARM_UP_NONE;
+sm_log_recover_impl *sysconf::recover_functor = nullptr;
 uint32_t sysconf::max_threads_per_node = 0;
 bool sysconf::loading = true;
 
@@ -32,8 +36,11 @@ sysconf::init() {
     max_threads_per_node = htt_is_on ?
         ncpus / 2 / (numa_max_node() + 1): ncpus / (numa_max_node() + 1);
     numa_nodes = (worker_threads + max_threads_per_node - 1) /  max_threads_per_node;
+
+    thread::init();
 }
 
 void sysconf::sanity_check() {
+    ALWAYS_ASSERT(recover_functor);
     ALWAYS_ASSERT(numa_nodes);
 }

@@ -374,6 +374,11 @@ public:
     return ((uint64_t)tv.tv_sec) * 1000000 + tv.tv_usec;
   }
 
+  inline uint64_t get_start()
+  {
+    return start;
+  }
+
 private:
 
   uint64_t start;
@@ -674,7 +679,7 @@ class unmanaged {
 public:
   template <class... Args>
   unmanaged(Args &&... args)
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     : destroyed_(false)
 #endif
   {
@@ -685,7 +690,7 @@ public:
   inline void
   destroy()
   {
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
     ALWAYS_ASSERT(!destroyed_);
     destroyed_ = true;
 #endif
@@ -704,7 +709,7 @@ public:
 
 private:
   char obj_[sizeof(T)];
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
   bool destroyed_;
 #endif
 } PACKED;

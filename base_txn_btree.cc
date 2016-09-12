@@ -16,7 +16,7 @@ base_txn_btree::do_search(transaction &t, const varstr &k, value_reader &vr)
     const bool found = this->underlying_btree.search(varkey(key_str), oid, tuple, t.xc, &sinfo);
     if (found)
         return t.do_tuple_read(tuple, vr);
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     else {
         rc_t rc = t.do_node_read(sinfo.first, sinfo.second);
         if (rc_is_abort(rc))
@@ -40,7 +40,7 @@ base_txn_btree::unsafe_purge(bool dump_stats)
 void
 base_txn_btree::purge_tree_walker::on_node_begin(const typename concurrent_btree::node_opaque_t *n)
 {
-    INVARIANT(spec_values.empty());
+    ASSERT(spec_values.empty());
     spec_values = concurrent_btree::ExtractValues(n);
 }
 
@@ -62,18 +62,19 @@ rc_t base_txn_btree::do_tree_put(
     const varstr *v,
     bool expect_new)
 {
-    INVARIANT(k);
-    INVARIANT(!expect_new || v); // makes little sense to remove() a key you expect
+    ASSERT(k);
+    ASSERT(!expect_new || v); // makes little sense to remove() a key you expect
                                  // to not be present, so we assert this doesn't happen
                                  // for now [since this would indicate a suboptimality]
     t.ensure_active();
-
-    // FIXME: tzwang: try_insert_new_tuple only tries once (no waiting, just one cas),
-    // it fails if somebody else acted faster to insert new, we then
-    // (fall back to) with the normal update procedure.
-    // try_insert_new_tuple should add tuple to write-set too, if succeeded.
-    if (expect_new and t.try_insert_new_tuple(&this->underlying_btree, k, v, this->fid))
-        return rc_t{RC_TRUE};
+    if (expect_new) {
+        if (t.try_insert_new_tuple(&this->underlying_btree, k, v, this->fid))
+            return rc_t{RC_TRUE};
+        // FIXME(tzwang): May 12, 2016 keep this upsert behavior for now, aborting causes
+        // problem in recovery - even single-thread Payment in TPC-C aborts.
+        //else
+        //    return rc_t{RC_ABORT_INTERNAL};
+    }
 
     // do regular search
     dbtuple * bv = 0;
@@ -83,7 +84,8 @@ rc_t base_txn_btree::do_tree_put(
 
     // first *updater* wins
     fat_ptr new_obj_ptr = NULL_PTR;
-    fat_ptr prev_obj_ptr = oidmgr->oid_put_update(this->underlying_btree.tuple_vec(), oid, v, t.xc, &new_obj_ptr);
+    fat_ptr prev_obj_ptr = oidmgr->oid_put_update(
+      this->underlying_btree.get_oid_array(), oid, v, t.xc, &new_obj_ptr);
     dbtuple *tuple = ((object *)new_obj_ptr.offset())->tuple();
     ASSERT(tuple);
 
@@ -91,7 +93,7 @@ rc_t base_txn_btree::do_tree_put(
         dbtuple *prev = ((object *)prev_obj_ptr.offset())->tuple();
         ASSERT((uint64_t)prev->get_object() == prev_obj_ptr.offset());
         ASSERT(t.xc);
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
         ASSERT(prev->sstamp == NULL_PTR);
         if (t.xc->ct3) {
             // Check if we are the T2 with a committed T3 earlier than a safesnap (being T1)
@@ -121,28 +123,26 @@ rc_t base_txn_btree::do_tree_put(
                             continue;
 
                         // copy everything before doing anything
-                        reader_begin = volatile_read(reader_xc->begin).offset();
+                        reader_begin = volatile_read(reader_xc->begin);
                         reader_owner = volatile_read(reader_xc->owner);
                         if (reader_owner != rxid)  // consult xstamp later
                             continue;
 
                         // we're safe if the reader is read-only (so far) and started after ct3
-                        if (sysconf::enable_ssi_read_only_opt and
-                            reader_xc->xct->write_set.size() == 0 and
-                            reader_begin >= t.xc->ct3) {
-                            oidmgr->oid_unlink(this->underlying_btree.tuple_vec(), oid, tuple);
+                        if (reader_xc->xct->write_set->size() > 0 and reader_begin <= t.xc->ct3) {
+                            oidmgr->oid_unlink(this->underlying_btree.get_oid_array(), oid, tuple);
                             return {RC_ABORT_SERIAL};
                         }
                     }
                 }
                 else {
-                    oidmgr->oid_unlink(this->underlying_btree.tuple_vec(), oid, tuple);
+                    oidmgr->oid_unlink(this->underlying_btree.get_oid_array(), oid, tuple);
                     return {RC_ABORT_SERIAL};
                 }
             }
         }
 #endif
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
         // update hi watermark
         // Overwriting a version could trigger outbound anti-dep,
         // i.e., I'll depend on some tx who has read the version that's
@@ -153,11 +153,11 @@ rc_t base_txn_btree::do_tree_put(
         if (t.xc->pstamp < prev_xstamp)
             t.xc->pstamp = prev_xstamp;
 
-#ifdef DO_EARLY_SSN_CHECKS
+#ifdef EARLY_SSN_CHECK
         if (not ssn_check_exclusion(t.xc)) {
             // unlink the version here (note abort_impl won't be able to catch
             // it because it's not yet in the write set)
-            oidmgr->oid_unlink(this->underlying_btree.tuple_vec(), oid, tuple);
+            oidmgr->oid_unlink(this->underlying_btree.get_oid_array(), oid, tuple);
             return rc_t{RC_ABORT_SERIAL};
         }
 #endif
@@ -179,16 +179,16 @@ rc_t base_txn_btree::do_tree_put(
             MM::deallocate(prev_obj_ptr);
         }
         else {  // prev is committed (or precommitted but in post-commit now) head
-#if defined(USE_PARALLEL_SSI) || defined(USE_PARALLEL_SSN)
+#if defined(SSI) || defined(SSN)
             volatile_write(prev->sstamp, t.xc->owner.to_ptr());
 #endif
         }
 
         ASSERT(not tuple->pvalue or tuple->pvalue->size() == tuple->size);
-        t.add_to_write_set(new_obj_ptr, this->underlying_btree.tuple_vec(), oid);
+        t.add_to_write_set(new_obj_ptr, this->underlying_btree.get_oid_array(), oid);
         ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_XID);
         ASSERT(oidmgr->oid_get_version(fid, oid, t.xc) == tuple);
-        INVARIANT(t.log);
+        ASSERT(t.log);
         if (not v)
             t.log->log_delete(this->fid, oid);
         else {
@@ -221,8 +221,8 @@ base_txn_btree
     VERBOSE(std::cerr << "on_resp_node(): <node=0x" << util::hexify(intptr_t(n))
                << ", version=" << version << ">" << std::endl);
     VERBOSE(std::cerr << "  " << concurrent_btree::NodeStringify(n) << std::endl);
-#ifdef PHANTOM_PROT_NODE_SET
-#ifdef USE_PARALLEL_SSN
+#ifdef PHANTOM_PROT
+#ifdef SSN
     if (t->flags & transaction::TXN_FLAG_READ_ONLY)
         return;
 #endif

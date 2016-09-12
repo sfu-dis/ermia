@@ -8,7 +8,7 @@ CXX=g++
 #CXX=g++491
 
 DEBUG ?= 0
-CHECK_INVARIANTS ?= 0
+NDEBUG ?= 0
 
 MYSQL ?= 1
 MYSQL_SHARE_DIR ?= /x/stephentu/mysql-5.5.29/build/sql/share
@@ -25,7 +25,7 @@ MASSTREE ?= 1
 ###############
 
 DEBUG_S=$(strip $(DEBUG))
-CHECK_INVARIANTS_S=$(strip $(CHECK_INVARIANTS))
+NDEBUG_S=$(strip $(NDEBUG))
 MODE_S=$(strip $(MODE))
 MASSTREE_S=$(strip $(MASSTREE))
 MASSTREE_CONFIG:=--enable-max-key-len=1024
@@ -41,7 +41,7 @@ ifeq ($(DEBUG_S),1)
 else
 	MASSTREE_CONFIG+=--disable-assertions
 endif
-ifeq ($(CHECK_INVARIANTS_S),1)
+ifeq ($(NDEBUG_S),1)
 	OSUFFIX_S=.check
 	MASSTREE_CONFIG+=--enable-invariants --enable-preconditions
 else
@@ -66,11 +66,11 @@ CXXFLAGS := -Wall -std=c++0x
 CXXFLAGS += -MD -Ithird-party/sparsehash/src -DCONFIG_H=\"$(CONFIG_H)\"
 
 ifeq ($(SSI_S),1)
-	CXXFLAGS += -DUSE_PARALLEL_SSI
+	CXXFLAGS += -DSSI
 else ifeq ($(RC_SSN_S),1)
-	CXXFLAGS += -DUSE_PARALLEL_SSN -DUSE_READ_COMMITTED -DDO_EARLY_SSN_CHECKS
+	CXXFLAGS += -DSSN -DRC -DEARLY_SSN_CHECK
 else ifeq ($(SI_SSN_S),1)
-	CXXFLAGS += -DUSE_PARALLEL_SSN -DDO_EARLY_SSN_CHECKS
+	CXXFLAGS += -DSSN -DEARLY_SSN_CHECK
 endif
 
 ifeq ($(DEBUG_S),1)
@@ -78,11 +78,11 @@ ifeq ($(DEBUG_S),1)
 else
         CXXFLAGS += -march=native -O2 -funroll-loops -fno-omit-frame-pointer
 endif
-ifeq ($(CHECK_INVARIANTS_S),1)
-	CXXFLAGS += -DCHECK_INVARIANTS
+ifeq ($(NDEBUG_S),1)
+	CXXFLAGS += -DNDEBUG
 endif
 ifeq ($(MASSTREE_S),1)
-	CXXFLAGS += -DNDB_MASSTREE -include masstree/config.h
+	CXXFLAGS += -DMASSTREE -include masstree/config.h
 	OBJDEP += masstree/config.h
 	O := $(O).masstree
 else
@@ -113,15 +113,18 @@ DBCORE_SRCFILES = dbcore/burt-hash.cpp \
 	dbcore/sm-chkpt.cpp \
 	dbcore/sm-config.cpp \
 	dbcore/sm-log.cpp \
+	dbcore/sm-file.cpp \
 	dbcore/sm-tx-log.cpp \
 	dbcore/sm-log-alloc.cpp \
 	dbcore/sm-log-recover.cpp \
 	dbcore/sm-log-offset.cpp \
 	dbcore/sm-log-file.cpp \
+	dbcore/sm-log-recover-impl.cpp \
 	dbcore/sm-oid.cpp \
 	dbcore/sm-oid-alloc-impl.cpp \
 	dbcore/sm-exceptions.cpp \
 	dbcore/sm-common.cpp \
+	dbcore/sm-thread.cpp \
 	dbcore/window-buffer.cpp \
 	dbcore/rcu-slist.cpp \
 	dbcore/rcu.cpp \

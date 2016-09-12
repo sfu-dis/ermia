@@ -11,17 +11,16 @@
 #include <unistd.h>
 #include <sys/sysinfo.h>
 
-#include "../dbcore/sm-config.h"
 #include "../dbcore/sm-alloc.h"
+#include "../dbcore/sm-config.h"
+#include "../dbcore/sm-log-recover-impl.h"
+#include "../dbcore/sm-thread.h"
 #include "bench.h"
 #include "ndb_wrapper.h"
 //#include "kvdb_wrapper.h"
 //#include "kvdb_wrapper_impl.h"
-#if !NO_MYSQL
-#include "mysql_wrapper.h"
-#endif
 
-#if defined(USE_PARALLEL_SSI) && defined(USE_PARALLEL_SSN)
+#if defined(SSI) && defined(SSN)
 #error "SSI + SSN?"
 #endif
 
@@ -46,10 +45,10 @@ main(int argc, char **argv)
   void (*test_fn)(abstract_db *, int argc, char **argv) = NULL;
   string bench_type = "ycsb";
   char *curdir = get_current_dir_name();
-  string basedir = curdir;
   string bench_opts;
   free(curdir);
   int saw_run_spec = 0;
+  string replay_mode("oid");
 
   while (1) {
     static struct option long_options[] =
@@ -62,7 +61,6 @@ main(int argc, char **argv)
       {"bench"                      , required_argument , 0                          , 'b'} ,
       {"scale-factor"               , required_argument , 0                          , 's'} ,
       {"num-threads"                , required_argument , 0                          , 't'} ,
-      {"basedir"                    , required_argument , 0                          , 'B'} ,
       {"txn-flags"                  , required_argument , 0                          , 'f'} ,
       {"runtime"                    , required_argument , 0                          , 'r'} ,
       {"ops-per-worker"             , required_argument , 0                          , 'n'} ,
@@ -70,18 +68,19 @@ main(int argc, char **argv)
       {"log-dir"                    , required_argument , 0                          , 'l'} ,
       {"log-segment-mb"             , required_argument , 0                          , 'e'} ,
       {"log-buffer-mb"              , required_argument , 0                          , 'u'} ,
-      {"warm-up"                    , required_argument , 0                          , 'w'} ,
+      {"recovery-warm-up"           , required_argument , 0                          , 'w'} ,
       {"enable-chkpt"               , no_argument       , &enable_chkpt              , 1} ,
       {"null-log-device"            , no_argument       , &sysconf::null_log_device  , 1} ,
+      {"parallel-recovery-by"       , required_argument , 0                          , 'c'},
       {"node-memory-gb"             , required_argument , 0                          , 'p'},
       {"enable-gc"                  , no_argument       , &sysconf::enable_gc        , 1},
       {"tmpfs-dir"                  , required_argument , 0                          , 'm'},
-#if defined(USE_PARALLEL_SSI) || defined(USE_PARALLEL_SSN)
+#if defined(SSI) || defined(SSN)
       {"safesnap"                   , no_argument       , &sysconf::enable_safesnap  , 1},
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
       {"ssi-read-only-opt"          , no_argument       , &sysconf::enable_ssi_read_only_opt, 1},
 #endif
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
       {"ssn-read-opt-threshold"     , required_argument , 0                          , 'h'},
 #endif
 #endif
@@ -92,12 +91,22 @@ main(int argc, char **argv)
     if (c == -1)
       break;
 
-    string *warm_up_policy = NULL;
     switch (c) {
     case 0:
       if (long_options[option_index].flag != 0)
         break;
       abort();
+
+    case 'c':
+      replay_mode = string(optarg);
+      if (replay_mode == "oid") {
+        sysconf::recover_functor = new parallel_oid_replay;
+      } else if (replay_mode == "file") {
+        sysconf::recover_functor = new parallel_file_replay;
+      } else {
+        std::cout << "Invalid parallel replay mode: " << replay_mode << "\n";
+        abort();
+      }
       break;
 
     case 'p':
@@ -117,15 +126,11 @@ main(int argc, char **argv)
       ALWAYS_ASSERT(sysconf::worker_threads > 0);
       break;
 
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
     case 'h':
       sysconf::ssn_read_opt_threshold = strtoul(optarg, NULL, 16);
       break;
 #endif
-
-    case 'B':
-      basedir = optarg;
-      break;
 
     case 'f':
       txn_flags = strtoul(optarg, NULL, 10);
@@ -140,13 +145,12 @@ main(int argc, char **argv)
       break;
 
     case 'w':
-      warm_up_policy = new string(optarg);
-      if (*warm_up_policy == "eager")
-        sm_log::warm_up = sm_log::WU_EAGER;
-      else if (*warm_up_policy == "lazy")
-        sm_log::warm_up = sm_log::WU_LAZY;
+      if (strcmp(optarg, "eager") == 0)
+        sysconf::recovery_warm_up_policy = sysconf::WARM_UP_EAGER;
+      else if (strcmp(optarg, "lazy") == 0)
+        sysconf::recovery_warm_up_policy = sysconf::WARM_UP_LAZY;
       else
-        sm_log::warm_up = sm_log::WU_NONE;
+        sysconf::recovery_warm_up_policy = sysconf::WARM_UP_NONE;
       break;
 
     case 'n':
@@ -197,17 +201,22 @@ main(int argc, char **argv)
   else
     ALWAYS_ASSERT(false);
 
+  // parallel replay by oid partitions by default
+  if (not sysconf::recover_functor) {
+    sysconf::recover_functor = new parallel_oid_replay;
+  }
+
   sysconf::init();
   if (sysconf::log_dir.empty()) {
     cerr << "[ERROR] no log dir specified" << endl;
     return 1;
   }
 
-#ifdef DEBUG
+#ifndef NDEBUG
   cerr << "WARNING: benchmark built in DEBUG mode!!!" << endl;
 #endif
 
-#ifdef CHECK_INVARIANTS
+#ifndef NDEBUG
   cerr << "WARNING: invariant checking is enabled - should disable for benchmark" << endl;
 #ifdef PARANOID_CHECKING
   cerr << "  *** Paranoid checking is enabled ***" << endl;
@@ -215,16 +224,23 @@ main(int argc, char **argv)
 #endif
 
   if (verbose) {
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
     printf("System: SSI\n");
-#elif defined(USE_PARALLEL_SSN)
-#ifdef USE_READ_COMMITTED
+#elif defined(SSN)
+#ifdef RC
     printf("System: RC+SSN\n");
+#elif defined RC_SPIN
+    printf("System: RC_SPIN+SSN\n");
 #else
     printf("System: SI+SSN\n");
 #endif
 #else
     printf("System: SI\n");
+#endif
+#ifdef PHANTOM_PROT
+    printf("Phantom protection: on\n");
+#else
+    printf("Phantom protection: off\n");
 #endif
     cerr << "Database Benchmark:"                           << endl;
     cerr << "  pid: " << getpid()                           << endl;
@@ -238,7 +254,6 @@ main(int argc, char **argv)
     cerr << "  scale       : " << scale_factor              << endl;
     cerr << "  num-threads : " << sysconf::worker_threads   << endl;
     cerr << "  numa-nodes  : " << sysconf::numa_nodes       << endl;
-    cerr << "  basedir     : " << basedir                   << endl;
     cerr << "  txn-flags   : " << hexify(txn_flags)         << endl;
     if (run_mode == RUNMODE_TIME)
       cerr << "  runtime     : " << runtime                 << endl;
@@ -253,16 +268,17 @@ main(int argc, char **argv)
     cerr << "  log-dir     : " << sysconf::log_dir          << endl;
     cerr << "  log-segment-mb: " << sysconf::log_segment_mb   << endl;
     cerr << "  log-buffer-mb: " << sysconf::log_buffer_mb    << endl;
-    cerr << "  warm-up     : ";
-    if (sm_log::warm_up == sm_log::WU_NONE)
-      cerr << "0";
-    else if (sm_log::warm_up == sm_log::WU_LAZY)
+    cerr << "  recovery-warm-up: ";
+    if (sysconf::recovery_warm_up_policy == sysconf::WARM_UP_NONE)
+      cerr << "none";
+    else if (sysconf::recovery_warm_up_policy == sysconf::WARM_UP_LAZY)
       cerr << "lazy";
     else {
-      ALWAYS_ASSERT(sm_log::warm_up == sm_log::WU_EAGER);
+      ALWAYS_ASSERT(sysconf::recovery_warm_up_policy == sysconf::WARM_UP_EAGER);
       cerr << "eager";
     }
     cerr << endl;
+    cerr << "  parallel-recover-by: " << replay_mode         << endl;
     cerr << "  enable-chkpt    : " << enable_chkpt           << endl;
     cerr << "  enable-gc       : " << sysconf::enable_gc     << endl;
     cerr << "  null-log-device : " << sysconf::null_log_device << endl;
@@ -282,13 +298,13 @@ main(int argc, char **argv)
 #else
     cerr << "  btree_node_prefetch     : no" << endl;
 #endif
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     cerr << "  SSN/SSI safe snapshot   : " << sysconf::enable_safesnap << endl;
 #endif
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
     cerr << "  SSI read-only optimization: " << sysconf::enable_ssi_read_only_opt << endl;
 #endif
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
     cerr << "  SSN read optimization threshold: 0x" << hex << sysconf::ssn_read_opt_threshold << dec << endl;
 #endif
   }

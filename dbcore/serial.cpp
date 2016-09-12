@@ -1,5 +1,5 @@
 #include "serial.h"
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
 namespace TXN {
 
 /* The read optimization for SSN
@@ -218,7 +218,7 @@ void serial_register_reader_tx(XID xid, readers_list::bitmap_t* tuple_readers_bi
     ASSERT(rlist.bitmap.array[tls_bitmap_info.index] & tls_bitmap_info.entry);
     // With read optimization, a transaction might not clear the bit,
     // so no need to set it again if it's set already (by a previous reader).
-    if (sysconf::ssn_read_opt_threshold != sysconf::SSN_READ_OPT_DISABLED &&
+    if (sysconf::ssn_read_opt_enabled() &&
         (volatile_read(tuple_readers_bitmap->array[tls_bitmap_info.index]) & tls_bitmap_info.entry) != 0) {
         return;
     }
@@ -238,15 +238,15 @@ void serial_deregister_reader_tx(readers_list::bitmap_t* tuple_readers_bitmap) {
 }
 
 void
-serial_stamp_last_committed_lsn(LSN lsn)
+serial_stamp_last_committed_lsn(uint64_t lsn)
 {
-    volatile_write(rlist.last_read_mostly_clsns[tls_bitmap_info.xid_index()]._val, lsn._val);
+    volatile_write(rlist.last_read_mostly_clsns[tls_bitmap_info.xid_index()], lsn);
 }
 
 uint64_t
 serial_get_last_read_mostly_cstamp(int xid_idx)
 {
-    return volatile_read(rlist.last_read_mostly_clsns[xid_idx]).offset();
+    return volatile_read(rlist.last_read_mostly_clsns[xid_idx]);
 }
 
 bool

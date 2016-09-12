@@ -25,7 +25,6 @@
 #include "macros.h"
 #include "varkey.h"
 #include "util.h"
-#include "thread.h"
 #include "spinlock.h"
 #include "static_vector.h"
 #include "prefetch.h"
@@ -49,6 +48,23 @@ class transaction {
 public:
   typedef dbtuple::size_type size_type;
   typedef TXN::txn_state txn_state;
+
+#if defined(SSN) || defined(SSI)
+  typedef std::vector<dbtuple *> read_set_t;
+#endif
+
+  struct write_record_t {
+    write_record_t(fat_ptr obj, oid_array *a, OID o) :
+        new_object(obj), oa(a), oid(o) {}
+    fat_ptr new_object;
+    oid_array *oa;
+    OID oid;
+    inline object *get_object() {
+      return (object *)new_object.offset();
+    }
+    write_record_t() : new_object(NULL_PTR), oa(nullptr), oid(0) {}
+  };
+  typedef std::vector<write_record_t> write_set_t;
 
   enum {
     // use the low-level scan protocol for checking scan consistency,
@@ -138,25 +154,10 @@ protected:
   inline void
   ensure_active()
   {
-    if (state() == TXN_EMBRYO)
-      volatile_write(xc->state, TXN_ACTIVE);
-    INVARIANT(state() == TXN_ACTIVE);
+    volatile_write(xc->state, TXN_ACTIVE);
+    ASSERT(state() == TXN_ACTIVE);
   }
-
-  struct write_record_t {
-    write_record_t(fat_ptr obj, oid_array *a, OID o) :
-        new_object(obj), oa(a), oid(o) {}
-    fat_ptr new_object;
-    oid_array *oa;
-    OID oid;
-    inline object *get_object() {
-      return (object *)new_object.offset();
-    }
-  };
-
-  typedef std::vector<write_record_t> write_set_map;
-
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
   // the absent set is a mapping from (btree_node -> version_number).
   struct absent_record_t { uint64_t version; };
   typedef dense_hash_map<const concurrent_btree::node_opaque_t*, absent_record_t> absent_set_map;
@@ -169,21 +170,21 @@ public:
   ~transaction();
 
   rc_t commit();
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
   rc_t parallel_ssn_commit();
   rc_t ssn_read(dbtuple *tuple);
-#elif defined USE_PARALLEL_SSI
+#elif defined SSI
   rc_t parallel_ssi_commit();
   rc_t ssi_read(dbtuple *tuple);
 #else
   rc_t si_commit();
 #endif
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
   bool check_phantom();
 #endif
 
-  void abort();
+  void abort_impl();
 
   void dump_debug_info() const;
 
@@ -200,7 +201,7 @@ protected:
   rc_t
   do_tuple_read(dbtuple *tuple, value_reader &value_reader);
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
   rc_t
   do_node_read(const typename concurrent_btree::node_opaque_t *n, uint64_t version);
 #endif
@@ -241,12 +242,13 @@ public:
   }
 
   void add_to_write_set(fat_ptr objptr, oid_array *oa, OID oid) {
-#if CHECK_INVARIANTS
-    for (auto& w : write_set) {
+#ifndef NDEBUG
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+      auto& w = (*write_set)[i];
       ASSERT(w.new_object != objptr);
     }
 #endif
-    write_set.emplace_back(objptr, oa, oid);
+    write_set->emplace_back(objptr, oa, oid);
   }
 
 protected:
@@ -255,10 +257,9 @@ protected:
   xid_context *xc;
   sm_tx_log* log;
   str_arena *sa;
-  write_set_map write_set;
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
-  typedef std::vector<dbtuple *> read_set_map;
-  read_set_map read_set;
+  write_set_t* write_set;
+#if defined(SSN) || defined(SSI)
+  read_set_t* read_set;
 #endif
   fat_ptr updated_oids_head;
   fat_ptr updated_oids_tail;

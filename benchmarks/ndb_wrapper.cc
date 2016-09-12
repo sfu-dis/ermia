@@ -4,31 +4,12 @@
 #include <stdint.h>
 #include "ndb_wrapper.h"
 #include "../dbcore/rcu.h"
+#include "../dbcore/sm-file.h"
 #include "../varkey.h"
 #include "../macros.h"
 #include "../util.h"
 #include "../txn.h"
 #include "../tuple.h"
-
-ndb_wrapper::ndb_wrapper()
-{
-  ALWAYS_ASSERT(sysconf::log_dir.size());
-  INVARIANT(!logmgr);
-  INVARIANT(!oidmgr);
-
-  RCU::rcu_register();
-  RCU::rcu_enter();
-  logmgr = sm_log::new_log(sm_log::recover, NULL);
-  ASSERT(oidmgr);
-  RCU::rcu_exit();
-  // rcu_deregister in dtor
-}
-
-ndb_wrapper::~ndb_wrapper()
-{
-  logmgr->flush();
-  RCU::rcu_deregister();
-}
 
 size_t
 ndb_wrapper::sizeof_txn_object(uint64_t txn_flags) const
@@ -65,7 +46,7 @@ ndb_wrapper::abort_txn(void *txn)
 {
   ndbtxn * const p = reinterpret_cast<ndbtxn *>(txn);
   auto t = (transaction *)&p->buf[0];
-  t->abort();
+  t->abort_impl();
   t->~transaction();
 }
 
@@ -80,30 +61,10 @@ ndb_wrapper::print_txn_debug(void *txn) const
 abstract_ordered_index *
 ndb_wrapper::open_index(const std::string &name, size_t value_size_hint, bool mostly_append)
 {
-  FID fid = 0;
-
-  // See if we already have an FID for this table (recovery did it)
-  std::unordered_map<std::string, std::pair<FID, ndb_ordered_index *> >::const_iterator it = fid_map.find(name);
-  if (it != fid_map.end())
-      fid = it->second.first;
-  else {
-      fid = oidmgr->create_file(true);
-      // log [table name, FID]
-      RCU::rcu_enter();
-      ASSERT(logmgr);
-      sm_tx_log *log = logmgr->new_tx_log();
-      log->log_fid(fid, name);
-      log->commit(NULL);
-      RCU::rcu_exit();
-  }
-  ASSERT(fid);
-  auto *index = new ndb_ordered_index(name, fid, value_size_hint, mostly_append);
-  fid_map.emplace(name, std::make_pair(fid, index));
-  // Prepare the index pointer for rebuild
-  if (it != fid_map.end()) {
-      ASSERT(it->second.second == NULL);
-      fid_map[name].second = index;
-  }
+  auto *index = new ndb_ordered_index(name, value_size_hint, mostly_append);
+  // Give an invalid FID for now, either the redoer or loader
+  // will fill in a meaningful one
+  sm_file_mgr::name_map[name] = new sm_file_descriptor(0, name, index);
   return index;
 }
 
@@ -111,16 +72,6 @@ void
 ndb_wrapper::close_index(abstract_ordered_index *idx)
 {
   delete idx;
-}
-
-ndb_ordered_index::ndb_ordered_index(
-    const std::string &name, FID fid, size_t value_size_hint, bool mostly_append)
-  : name(name), btr(value_size_hint, mostly_append, name, fid)
-{
-  // for debugging
-  //std::cerr << name << " : btree= "
-  //          << btr.get_underlying_btree()
-  //          << std::endl;
 }
 
 rc_t

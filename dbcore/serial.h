@@ -4,22 +4,19 @@
 #include "sm-rc.h"
 #include "xid.h"
 
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
 namespace TXN {
 void assign_reader_bitmap_entry();
 void deassign_reader_bitmap_entry();    
 
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
 // returns true if serializable, false means exclusion window violation
 inline bool ssn_check_exclusion(xid_context *xc) {
-    auto ss = xc->sstamp.load(std::memory_order_acquire) & (~xid_context::sstamp_final_mark);
-#if CHECK_INVARIANTS
-    if (xc->pstamp >= ss) printf("ssn exclusion failure\n");
+    uint64_t ss = xc->sstamp.load(std::memory_order_acquire) & (~xid_context::sstamp_final_mark);
+#ifndef NDEBUG
+    if (ss and xc->pstamp >= ss) printf("ssn exclusion failure\n");
 #endif
-    // if predecessor >= sucessor, then predecessor might depend on sucessor => cycle
-    // note xc->sstamp is initialized to ~0, xc->pstamp's init value is 0,
-    // so don't return xc->pstamp < xc->sstamp...
-    if (xc->pstamp >= ss) {
+    if (ss and xc->pstamp >= ss) {
         return false;
     }
     return true;
@@ -55,7 +52,7 @@ struct readers_list {
 
     bitmap_t bitmap;
     XID xids[bitmap_t::CAPACITY];  // one xid per bit position
-    LSN last_read_mostly_clsns[bitmap_t::CAPACITY];
+    uint64_t last_read_mostly_clsns[bitmap_t::CAPACITY];
 
     readers_list() {
         memset(xids, '\0', sizeof(XID) * bitmap_t::CAPACITY);
@@ -64,7 +61,7 @@ struct readers_list {
 };
 
 uint64_t serial_get_last_read_mostly_cstamp(int xid_idx);
-void serial_stamp_last_committed_lsn(LSN lsn);
+void serial_stamp_last_committed_lsn(uint64_t lsn);
 void serial_deregister_reader_tx(readers_list::bitmap_t* tuple_readers_bitmap);
 void serial_register_reader_tx(XID xid, readers_list::bitmap_t* tuple_readers_bitmap);
 void serial_register_tx(XID xid);

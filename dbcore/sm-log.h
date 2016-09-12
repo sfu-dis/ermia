@@ -16,9 +16,14 @@
  */
 #include <unordered_map>
 #include "sm-common.h"
+#include "sm-thread.h"
+#include "window-buffer.h"
 
 class ndb_ordered_index;
 class object;
+class sm_log_file_mgr;
+class segment_id;
+class sm_log_recover_impl;
 
 struct sm_tx_log {
     /* Record an insertion. The payload of the version will be
@@ -87,7 +92,7 @@ struct sm_tx_log {
        be called multiple times to retrieve an existing commit LSN.
 
        NOTE: the commit LSN actually points past-end of the commit
-       block, in keeping with cur_lsn and durable_lsn (which
+       block, in keeping with cur_lsn and durable_flushed_lsn (which
        respectively identify the first LSN past-end of any currently
        in use, and the first LSN that is not durable).
 
@@ -104,7 +109,7 @@ struct sm_tx_log {
        It is not necessary to have called pre_commit first.
 
        NOTE: the transaction will not actually be durable until
-       sm_log::durable_lsn catches up to the pre_commit LSN.
+       sm_log::durable_flushed_lsn catches up to the pre_commit LSN.
 
        WARNING: By calling this function, the caller gives up
        ownership of this object and should not access it again.
@@ -306,38 +311,17 @@ typedef void sm_log_recover_function(void *arg, sm_log_scan_mgr *scanner,
 struct sm_log {
     static bool need_recovery;
 
-    // Warm-up policy when recovering from a chkpt or the log.
-    // Set by --warm-up=[lazy/eager/whatever].
-    //
-    // --warm-up = lazy:  spawn a thread to access every OID entry after
-    //                    recovery; log/chkpt recovery will only oid_put
-    //                    objects that contain the records' log location.
-    //                    Tx's might encounter some storage-resident
-    //                    versions, if the tx tried to access them before
-    //                    the warm-up thread fetched those versions.
-    //
-    // --warm-up = eager: dig out versions from the log when scanning
-    //                    the chkpt and log; all OID entries will point
-    //                    to some memory location after recovery finishes.
-    //                    Txs will only see memory-residents, no need to
-    //                    dig them out during execution.
-    //
-    // --warm-up ommitted or = anything else: don't do warm-up at all; it
-    //      is the tx's burden to dig out versions when accessing them.
-    enum WU_POLICY { WU_NONE, WU_LAZY, WU_EAGER };
-    static int warm_up; // no/lazy/eager warm-up at recovery
-
     void update_chkpt_mark(LSN cstart, LSN cend);
     LSN flush();
-    LSN flush_cur_lsn();
     void set_tls_lsn_offset(uint64_t offset);
+    uint64_t get_tls_lsn_offset();
 
     /* Allocate and return a new sm_log object. If [dname] exists, it
        will be mounted and used. Otherwise, a new (empty) log
        directory will be created.
      */
     static
-    sm_log *new_log(sm_log_recover_function *rfn, void *rfn_arg);
+    sm_log *new_log(sm_log_recover_impl *recover_functor, void *rarg);
 
     /* Return a pointer to the log's scan manager.
 
@@ -361,16 +345,16 @@ struct sm_log {
     /* Return the current durable LSN. This is the LSN before which
        all log records are known to have reached stable storage; any
        LSN at or beyond this point may not be durable yet. If
-       cur_lsn() == durable_lsn(), all log records are durable.
+       cur_lsn() == durable_flushed_lsn(), all log records are durable.
      */
-    LSN durable_lsn();
+    LSN durable_flushed_lsn();
 
-    /* Block the calling thread until durable_lsn() is not smaller
+    /* Block the calling thread until durable_flushed_lsn() is not smaller
        than [dlsn]. This will not occur until all log_allocation
        objects with LSN smaller than [dlsn] have been released or
        discarded.
      */
-    void wait_for_durable_lsn(LSN dlsn);
+    void wait_for_durable_flushed_lsn_offset(uint64_t offset);
 
     /* Load the object referenced by [ptr] from the log. The pointer
        must reference the log (ASI_LOG) and the given buffer must be large
@@ -384,25 +368,14 @@ struct sm_log {
      */
     fat_ptr load_ext_pointer(fat_ptr ptr);
 
-    /* Scan from a start LSN and apply log records.
-     * Implements the sm_log_recover_function signature.
-     */
-    static void recover(void *arg, sm_log_scan_mgr *scanner, LSN chkpt_begin, LSN chkpt_end);
-    static std::pair<FID, OID> redo_file(sm_log_scan_mgr *scanner, LSN chkpt_begin, FID fid);
+    window_buffer &get_logbuf();
+    segment_id *assign_segment(uint64_t lsn_begin, uint64_t lsn_end);
+    uint64_t persist_log_buffer();
+    segment_id *flush_log_buffer(window_buffer &logbuf, uint64_t new_dlsn_offset, bool update_dmark);
+    void redo_log(LSN start_lsn, LSN end_lsn);
+    void enqueue_committed_xct(uint32_t worker_id, uint64_t start_time);
 
     virtual ~sm_log() { }
-
-private:
-    static void recover_insert(sm_log_scan_mgr::record_scan *logrec);
-    static void recover_update(sm_log_scan_mgr::record_scan *logrec, bool is_delete = false);
-    static fat_ptr recover_prepare_version(
-                                sm_log_scan_mgr::record_scan *logrec,
-                                fat_ptr next);
-    static void recover_fid(sm_log_scan_mgr::record_scan *logrec);
-
-public:
-    static std::pair<std::string, uint64_t> rebuild_index(FID fid, ndb_ordered_index *index);
-    static void recover_index();
 
 protected:
     // Forbid direct instantiation

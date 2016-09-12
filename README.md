@@ -24,12 +24,12 @@ This limits the maximum for --node-memory-gb to 10 for a 4-socket machine (see b
 
 ERMIA supports Read Committed (RC), Snapshot Isolation (SI), Serializable Snapshot Isolation (SSI), and Serial Safety Net (SSN) with SI/RC. Switches are defined in src/macros.h:
 
-* `#define USE_PARALLEL_SSI` to use serializable snapshot isolation (SSI);
-* `#define USE_PARALLEL_SSN` to use the serial safety net (SSN);
-   - SSN may be used in conjunction with RC (`USE_READ_COMMITTED`) or SI (default);
-   - `# define DO_EARLY_SSN_CHECKS` enables SSN window exclusion tests during normal reads and writes.
+* `#define SSI` to use serializable snapshot isolation (SSI);
+* `#define SSN` to use the serial safety net (SSN);
+   - SSN may be used in conjunction with RC (`RC`) or SI (default);
+   - `# define EARLY_SSN_CHECK` enables SSN window exclusion tests during normal reads and writes.
 
-`USE_PARALLEL_SSI` and `USE_PARALLEL_SSN` are mutually exclusive.
+`SSI` and `SSN` are mutually exclusive.
 
 Giving `-D[SCHEME]` to `$make` also works. `SCHEME` can be `RC`, `SI`, `RC_SSN`, `SI_SSN`, or `SSI`.
 

@@ -1,4 +1,5 @@
 #include "sm-log-recover.h"
+#include "sm-log-recover-impl.h"
 #include "sm-log-impl.h"
 #include "sm-oid.h"
 
@@ -7,11 +8,11 @@
 
 using namespace RCU;
 
-sm_log_recover_mgr::sm_log_recover_mgr(sm_log_recover_function *rfn, void *rfn_arg)
+sm_log_recover_mgr::sm_log_recover_mgr(sm_log_recover_impl *rf, void *rf_arg)
     : sm_log_offset_mgr()
     , scanner(new sm_log_scan_mgr_impl{this})
-    , recover_function(rfn)
-    , recover_function_arg(rfn_arg)
+    , recover_functor(rf)
+    , recover_functor_arg(rf_arg)
 {
     LSN dlsn = get_durable_mark();
     bool changed = false;
@@ -33,8 +34,14 @@ sm_log_recover_mgr::sm_log_recover_mgr(sm_log_recover_function *rfn, void *rfn_a
     sm_oid_mgr::create(get_chkpt_start(), this);
     ASSERT(oidmgr);
 
-    if (rfn and sm_log::need_recovery)
-        (*rfn)(rfn_arg, scanner, get_chkpt_start(), get_chkpt_end());
+    if (rf and sm_log::need_recovery)
+        redo_log(get_chkpt_start(), LSN{~uint64_t{0}});  // till end of log
+}
+
+void
+sm_log_recover_mgr::redo_log(LSN chkpt_start_lsn, LSN chkpt_end_lsn)
+{
+    (*recover_functor)(recover_functor_arg, scanner, chkpt_start_lsn, chkpt_end_lsn);
 }
 
 sm_log_recover_mgr::~sm_log_recover_mgr()
@@ -47,7 +54,7 @@ sm_log_recover_mgr::block_scanner::block_scanner(sm_log_recover_mgr *lm, LSN sta
     : _lm(lm)
     , _follow_overflow(follow_overflow)
     , _fetch_payloads(fetch_payloads)
-    , _buf((char*)rcu_alloc(fetch_payloads? MAX_BLOCK_SIZE : MIN_BLOCK_FETCH))
+    , _buf((log_block*)rcu_alloc(fetch_payloads? MAX_BLOCK_SIZE : MIN_BLOCK_FETCH))
 {
     _load_block(start, _follow_overflow);
 }
@@ -65,7 +72,7 @@ sm_log_recover_mgr::block_scanner::operator++()
        follow them the second time around.
      */
     if (_overflow_chain.empty()) {
-        _load_block(_block->next_lsn(), _follow_overflow);
+        _load_block(_cur_block->next_lsn(), _follow_overflow);
     }
     else {
         _load_block(_overflow_chain.back(), false);
@@ -76,7 +83,7 @@ sm_log_recover_mgr::block_scanner::operator++()
 void
 sm_log_recover_mgr::block_scanner::_load_block(LSN x, bool follow_overflow)
 {
-    DEFER_UNLESS(success, *_block = invalid_block());
+    DEFER_UNLESS(success, *_buf = invalid_block());
     if (x == INVALID_LSN)
         return;
     
@@ -93,35 +100,39 @@ sm_log_recover_mgr::block_scanner::_load_block(LSN x, bool follow_overflow)
         if (sid->segnum % NUM_LOG_SEGMENTS != segnum % NUM_LOG_SEGMENTS)
             return;
     }
-    
+
     // helper function... pread may not read everything in one call
     auto pread = [&](size_t nbytes, uint64_t i)->size_t {
         uint64_t offset = sid->offset(x);
-        return i+os_pread(sid->fd, _buf+i, nbytes-i, offset+i);
+        _cur_block = _buf;
+        return i+os_pread(sid->fd, ((char *)_buf)+i, nbytes-i, offset+i);
     };
         
     /* Fetch log header */
+    _cur_block = nullptr;
     size_t n = pread(MIN_BLOCK_FETCH, 0);
+
     if (n < MIN_BLOCK_FETCH) {
         /* Not necessarily a problem: we could be at the end of a
-           segment and most log records are smaller than max size.
+           segment and most log records are smaller than max size
          */
         if (n < MIN_LOG_BLOCK_SIZE)
             return; // truncate!
-        if (n < log_block::size(_block->nrec, 0))
+        if (n < log_block::size(_cur_block->nrec, 0))
             return; // truncate!
         
         // fall out: looks like we're OK
     }
 
+    ALWAYS_ASSERT(_cur_block);
     // cursory validation to avoid buffer overflow
-    if (x != _block->lsn or _block->nrec > MAX_BLOCK_RECORDS)
+    if (x != _cur_block->lsn or _cur_block->nrec > MAX_BLOCK_RECORDS)
         return; // corrupt ==> truncate
 
     if (follow_overflow) {
-        log_record *r = _block->records;
+        log_record *r = _cur_block->records;
         if (r->type == LOG_OVERFLOW) {
-            _overflow_chain.push_back(_block->lsn);
+            _overflow_chain.push_back(_cur_block->lsn);
             success = true;
             return _load_block(r->prev_lsn, true);
             /* ^^^
@@ -135,7 +146,7 @@ sm_log_recover_mgr::block_scanner::_load_block(LSN x, bool follow_overflow)
     }
 
     if (_fetch_payloads) {
-        uint64_t bsize = _block->payload_end() - _buf;
+        uint64_t bsize = (char *)_cur_block->payload_end() - (char *)_cur_block;
         if (bsize > MAX_BLOCK_SIZE)
             return; // corrupt ==> truncate
         

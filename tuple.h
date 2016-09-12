@@ -5,7 +5,6 @@
 #include "macros.h"
 #include "varkey.h"
 #include "util.h"
-#include "thread.h"
 
 #include "reader_writer.h"
 #include "dbcore/xid.h"
@@ -17,7 +16,7 @@ using namespace TXN;
 // differentiate with delete case (pvalue = null)
 #define DEFUNCT_TUPLE_MARK ((varstr *)0x1)
 
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
 // Indicate somebody has read this tuple and thought it was an old one
 #define PERSISTENT_READER_MARK 0x1
 #endif
@@ -32,14 +31,14 @@ public:
   typedef uint32_t size_type;
   typedef varstr string_type;
 
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
   readers_list::bitmap_t   readers_bitmap;   // bitmap of in-flight readers
   fat_ptr sstamp;          // successor (overwriter) stamp (\pi in ssn), set to writer XID during
                            // normal write to indicate its existence; become writer cstamp at commit
   uint64_t xstamp;         // access (reader) stamp (\eta), updated when reader commits
   uint64_t preader;         // did I have some reader thinking I'm old?
 #endif
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
   uint64_t s2;  // smallest successor stamp of all reads performed by the tx
                 // that clobbered this version
                 // Consider a transaction T which clobbers this version, upon
@@ -58,12 +57,12 @@ public:
 
   dbtuple(size_type size)
     :
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
       sstamp(NULL_PTR),
       xstamp(0),
       preader(0),
 #endif
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
       s2(0),
 #endif
       size(CheckBounds(size)),
@@ -79,7 +78,7 @@ public:
     READ_RECORD,
   };
 
-#if defined(USE_PARALLEL_SSN)
+#if defined(SSN)
   /* return the tuple's age based on a safe_lsn provided by the calling tx.
    * safe_lsn usually = the calling tx's begin offset.
    *
@@ -98,7 +97,7 @@ public:
       if (xid == owner)   // my own update
         return 0;
       xid_context *xc = xid_get_context(xid);
-      end = volatile_read(xc->end).offset();
+      end = volatile_read(xc->end);
       if (not xc or xc->owner != xid)
         goto retry;
     }
@@ -108,7 +107,7 @@ public:
     }
 
     // the caller must be alive...
-    return volatile_read(visitor->begin).offset() - end;
+    return volatile_read(visitor->begin) - end;
   }
   bool is_old(xid_context *visitor);  // FOR READERS ONLY!
   inline ALWAYS_INLINE bool set_persistent_reader() {
@@ -122,23 +121,27 @@ public:
            not __sync_bool_compare_and_swap(&preader, pr, PERSISTENT_READER_MARK));
     return true;
   }
+#endif
+#if defined(SSN)
   inline ALWAYS_INLINE bool has_persistent_reader() {
     return volatile_read(preader) & PERSISTENT_READER_MARK;
   }
+  // XXX: for the writer who's updating this tuple only
+  inline ALWAYS_INLINE void lockout_read_mostly_tx() {
+    if (sysconf::ssn_read_opt_enabled()) {
+      if (not (volatile_read(preader) >> 7))
+          __sync_fetch_and_xor(&preader, uint64_t{1} << 7);
+      ASSERT(volatile_read(preader) >> 7);
+    }
+  }
 
   // XXX: for the writer who's updating this tuple only
-  inline ALWAYS_INLINE void lockout_readers() {
-    if (not (volatile_read(preader) >> 7))
-        __sync_fetch_and_xor(&preader, uint64_t{1} << 7);
-    ASSERT(volatile_read(preader) >> 7);
-  }
-#endif
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
-  // XXX: for the writer who's updating this tuple only
-  inline ALWAYS_INLINE void welcome_readers() {
-    if (volatile_read(preader) >> 7)
-        __sync_fetch_and_xor(&preader, uint64_t{1} << 7);
-    ASSERT(not (volatile_read(preader) >> 7));
+  inline ALWAYS_INLINE void welcome_read_mostly_tx() {
+    if (sysconf::ssn_read_opt_enabled()) {
+      if (volatile_read(preader) >> 7)
+          __sync_fetch_and_xor(&preader, uint64_t{1} << 7);
+      ASSERT(not (volatile_read(preader) >> 7));
+    }
   }
 #endif
 
@@ -191,7 +194,7 @@ private:
   static inline ALWAYS_INLINE size_type
   CheckBounds(size_type s)
   {
-    INVARIANT(s <= std::numeric_limits<size_type>::max());
+    ASSERT(s <= std::numeric_limits<size_type>::max());
     return s;
   }
 

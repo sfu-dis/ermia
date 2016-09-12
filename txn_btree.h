@@ -64,9 +64,8 @@ public:
 
   txn_btree(size_type value_size_hint = 128,
             bool mostly_append = false,
-            const std::string &name = "<unknown>",
-            FID fid = 0)
-    : base_txn_btree(value_size_hint, mostly_append, name, fid)
+            const std::string &name = "<unknown>")
+    : base_txn_btree(value_size_hint, mostly_append, name)
   {}
 
   inline rc_t
@@ -151,16 +150,16 @@ public:
   inline rc_t
   insert(transaction &t, const key_type &k, const uint8_t *v, size_type sz)
   {
-    INVARIANT(v);
-    INVARIANT(sz);
+    ASSERT(v);
+    ASSERT(sz);
     return this->do_tree_put(t, stablize(t, k), stablize(t, v, sz), true);
   }
 
   inline void
   insert(transaction &t, const varkey &k, const uint8_t *v, size_type sz)
   {
-    INVARIANT(v);
-    INVARIANT(sz);
+    ASSERT(v);
+    ASSERT(sz);
     this->do_tree_put(t, stablize(t, k), stablize(t, v, sz), true);
   }
 

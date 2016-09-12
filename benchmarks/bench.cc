@@ -11,11 +11,14 @@
 #include <sys/sysinfo.h>
 
 #include "bench.h"
+#include "ndb_wrapper.h"
 
 #include "../dbcore/rcu.h"
-#include "../dbcore/sm-config.h"
-#include "../dbcore/sm-log.h"
 #include "../dbcore/sm-chkpt.h"
+#include "../dbcore/sm-config.h"
+#include "../dbcore/sm-file.h"
+#include "../dbcore/sm-log.h"
+#include "../dbcore/sm-log-recover-impl.h"
 
 using namespace std;
 using namespace util;
@@ -33,6 +36,8 @@ int retry_aborted_transaction = 0;
 int backoff_aborted_transaction = 0;
 int enable_chkpt = 0;
 
+std::vector<bench_worker*> bench_runner::workers;
+
 template <typename T>
 static void
 delete_pointers(const vector<T *> &pts)
@@ -45,7 +50,7 @@ template <typename T>
 	static vector<T>
 elemwise_sum(const vector<T> &a, const vector<T> &b)
 {
-	INVARIANT(a.size() == b.size());
+	ASSERT(a.size() == b.size());
 	vector<T> ret(a.size());
 	for (size_t i = 0; i < a.size(); i++)
 		ret[i] = a[i] + b[i];
@@ -62,17 +67,8 @@ map_agg(map<K, V> &agg, const map<K, V> &m)
 }
 
 void
-bench_worker::run()
+bench_worker::my_work(char *)
 {
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
-    TXN::assign_reader_bitmap_entry();
-#endif
-    // XXX. RCU register/deregister should be the outer most one b/c
-    // MM::deregister_thread could call cur_lsn inside
-	RCU::rcu_register();
-    MM::register_thread();
-	RCU::rcu_start_tls_cache( 32, 100000 );
-	on_run_setup();
 	const workload_desc_vec workload = get_workload();
 	txn_counts.resize(workload.size());
 	barrier_a->count_down();
@@ -86,7 +82,7 @@ retry:
 				const unsigned long old_seed = r.get_seed();
 				const auto ret = workload[i].fn(this);
 
-                if (likely(not rc_is_abort(ret))) {
+        if (likely(not rc_is_abort(ret))) {
 					++ntxn_commits;
                     std::get<0>(txn_counts[i])++;
 					latency_numer_us += t.lap();
@@ -128,44 +124,94 @@ retry:
 			d -= workload[i].frequency;
 		}
 	}
-    MM::deregister_thread();
-    RCU::rcu_deregister();
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
-    TXN::deassign_reader_bitmap_entry();
-#endif
+}
+
+void
+bench_runner::create_files_task(char *)
+{
+  ALWAYS_ASSERT(sysconf::log_dir.size());
+  ALWAYS_ASSERT(not logmgr);
+  ALWAYS_ASSERT(not oidmgr);
+  RCU::rcu_enter();
+  logmgr = sm_log::new_log(sysconf::recover_functor, nullptr);
+  ASSERT(oidmgr);
+  RCU::rcu_exit();
+
+  if (not sm_log::need_recovery) {
+    // allocate an FID for each table
+    for (auto &nm : sm_file_mgr::name_map) {
+      ALWAYS_ASSERT(nm.second->index);
+      auto fid = oidmgr->create_file(true);
+      nm.second->fid = fid;
+      nm.second->index->set_oid_array(fid);
+
+      // Initialize the fid_map entries
+      if (sm_file_mgr::fid_map[nm.second->fid] != nm.second) {
+        sm_file_mgr::fid_map[nm.second->fid] = nm.second;
+      }
+
+      // log [table name, FID]
+      ASSERT(logmgr);
+      RCU::rcu_enter();
+      sm_tx_log *log = logmgr->new_tx_log();
+      log->log_fid(fid, nm.second->name);
+      log->commit(NULL);
+      RCU::rcu_exit();
+    }
+  }
 }
 
 void
 bench_runner::run()
 {
-  // Invalidate my own tls_lsn_offset - I'm not doing transactions.
-  // The benchmark's ctor should be the last place where it touches
-  // the log in this thread.
-  logmgr->set_tls_lsn_offset(~uint64_t{0});
+  // get a thread to set the stage (e.g., create tables etc)
+  auto* runner_thread = thread::get_thread();
+  thread::sm_thread::task_t runner_task = std::bind(&bench_runner::prepare, this, std::placeholders::_1);
+  runner_thread->start_task(runner_task);
+  runner_thread->join();
+
+  // start another task to create the logmgr and FIDs backing each table
+  runner_task = std::bind(&bench_runner::create_files_task, this, std::placeholders::_1);
+  runner_thread->start_task(runner_task);
+  runner_thread->join();
+  thread::put_thread(runner_thread);
 
   // load data
   if (not sm_log::need_recovery) {
-    const vector<bench_loader *> loaders = make_loaders();
-    spin_barrier b(loaders.size());
+    vector<bench_loader *> loaders = make_loaders();
     {
       scoped_timer t("dataloading", verbose);
-      for (vector<bench_loader *>::const_iterator it = loaders.begin();
-          it != loaders.end(); ++it) {
-        (*it)->set_barrier(b);
-        (*it)->start();
+      uint32_t done = 0;
+    process:
+      for (uint i = 0; i < loaders.size(); i++) {
+        auto* loader = loaders[i];
+        if (loader and not loader->is_impersonated() and loader->try_impersonate()) {
+          loader->start();
+        }
       }
-      for (vector<bench_loader *>::const_iterator it = loaders.begin();
-          it != loaders.end(); ++it)
-        (*it)->join();
+
+      // Loop over existing loaders to scavenge and reuse available threads
+      while (done < loaders.size()) {
+        for (uint i = 0; i < loaders.size(); i++) {
+          auto* loader = loaders[i];
+          if (loader and loader->is_impersonated() and loader->try_join()) {
+            delete loader;
+            loaders[i] = nullptr;
+            done++;
+            goto process;
+          }
+        }
+      }
     }
     RCU::rcu_register();
     RCU::rcu_enter();
-    volatile_write(MM::safesnap_lsn._val, logmgr->cur_lsn()._val);
-    ALWAYS_ASSERT(MM::safesnap_lsn.offset());
+    volatile_write(MM::safesnap_lsn, logmgr->cur_lsn().offset());
+    ALWAYS_ASSERT(MM::safesnap_lsn);
     RCU::rcu_exit();
     RCU::rcu_deregister();
-    delete_pointers(loaders);
   }
+
+  volatile_write(sysconf::loading, false);
 
   map<string, size_t> table_sizes_before;
 
@@ -176,11 +222,9 @@ bench_runner::run()
   }
 
   // Persist the database
-  logmgr->flush_cur_lsn();
+  logmgr->flush();
 
-  volatile_write(sysconf::loading, false);
-
-  const vector<bench_worker *> workers = make_workers();
+  workers = make_workers();
   ALWAYS_ASSERT(!workers.empty());
   for (vector<bench_worker *>::const_iterator it = workers.begin();
        it != workers.end(); ++it)
@@ -225,6 +269,10 @@ bench_runner::run()
     }
     running = false;
   }
+
+  // Persist whatever still left in the log buffer
+  logmgr->flush();
+
   __sync_synchronize();
   for (size_t i = 0; i < sysconf::worker_threads; i++)
     workers[i]->join();
@@ -286,6 +334,7 @@ bench_runner::run()
       std::get<2>(agg_txn_counts[t.first]) += std::get<2>(t.second);
       std::get<3>(agg_txn_counts[t.first]) += std::get<3>(t.second);
     }
+    workers[i]->~bench_worker();
   }
 
   if (enable_chkpt)
@@ -385,8 +434,6 @@ bench_runner::run()
 
   }
   open_tables.clear();
-
-  delete_pointers(workers);
 }
 
 template <typename K, typename V>
