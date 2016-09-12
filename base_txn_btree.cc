@@ -67,13 +67,14 @@ rc_t base_txn_btree::do_tree_put(
                                  // to not be present, so we assert this doesn't happen
                                  // for now [since this would indicate a suboptimality]
     t.ensure_active();
-
-    // FIXME: tzwang: try_insert_new_tuple only tries once (no waiting, just one cas),
-    // it fails if somebody else acted faster to insert new, we then
-    // (fall back to) with the normal update procedure.
-    // try_insert_new_tuple should add tuple to write-set too, if succeeded.
-    if (expect_new and t.try_insert_new_tuple(&this->underlying_btree, k, v, this->fid))
-        return rc_t{RC_TRUE};
+    if (expect_new) {
+        if (t.try_insert_new_tuple(&this->underlying_btree, k, v, this->fid))
+            return rc_t{RC_TRUE};
+        // FIXME(tzwang): May 12, 2016 keep this upsert behavior for now, aborting causes
+        // problem in recovery - even single-thread Payment in TPC-C aborts.
+        //else
+        //    return rc_t{RC_ABORT_INTERNAL};
+    }
 
     // do regular search
     dbtuple * bv = 0;
@@ -99,10 +100,6 @@ rc_t base_txn_btree::do_tree_put(
             if (t.xc->ct3 <= t.xc->last_safesnap)
                 return {RC_ABORT_SERIAL};
 
-            // If I have a committed T3, that means T3 must committed after I started,
-            // otherwise I would have read the version created by T3 - T3 wouldn't have
-            // overwritten my read.
-            ASSERT(t.xc->begin.offset() < t.xc->ct3);
             if (volatile_read(prev->xstamp) >= t.xc->ct3 or not prev->readers_bitmap.is_empty(true)) {
                 // Read-only optimization: safe if T1 is read-only (so far) and T1's begin ts
                 // is before ct3.

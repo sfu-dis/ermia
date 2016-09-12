@@ -11,15 +11,14 @@
 #include <unistd.h>
 #include <sys/sysinfo.h>
 
-#include "../dbcore/sm-config.h"
 #include "../dbcore/sm-alloc.h"
+#include "../dbcore/sm-config.h"
+#include "../dbcore/sm-log-recover-impl.h"
+#include "../dbcore/sm-thread.h"
 #include "bench.h"
 #include "ndb_wrapper.h"
 //#include "kvdb_wrapper.h"
 //#include "kvdb_wrapper_impl.h"
-#if !NO_MYSQL
-#include "mysql_wrapper.h"
-#endif
 
 #if defined(SSI) && defined(SSN)
 #error "SSI + SSN?"
@@ -49,6 +48,7 @@ main(int argc, char **argv)
   string bench_opts;
   free(curdir);
   int saw_run_spec = 0;
+  string replay_mode("oid");
 
   while (1) {
     static struct option long_options[] =
@@ -68,9 +68,10 @@ main(int argc, char **argv)
       {"log-dir"                    , required_argument , 0                          , 'l'} ,
       {"log-segment-mb"             , required_argument , 0                          , 'e'} ,
       {"log-buffer-mb"              , required_argument , 0                          , 'u'} ,
-      {"warm-up"                    , required_argument , 0                          , 'w'} ,
+      {"recovery-warm-up"           , required_argument , 0                          , 'w'} ,
       {"enable-chkpt"               , no_argument       , &enable_chkpt              , 1} ,
       {"null-log-device"            , no_argument       , &sysconf::null_log_device  , 1} ,
+      {"parallel-recovery-by"       , required_argument , 0                          , 'c'},
       {"node-memory-gb"             , required_argument , 0                          , 'p'},
       {"enable-gc"                  , no_argument       , &sysconf::enable_gc        , 1},
       {"tmpfs-dir"                  , required_argument , 0                          , 'm'},
@@ -90,12 +91,22 @@ main(int argc, char **argv)
     if (c == -1)
       break;
 
-    string *warm_up_policy = NULL;
     switch (c) {
     case 0:
       if (long_options[option_index].flag != 0)
         break;
       abort();
+
+    case 'c':
+      replay_mode = string(optarg);
+      if (replay_mode == "oid") {
+        sysconf::recover_functor = new parallel_oid_replay;
+      } else if (replay_mode == "file") {
+        sysconf::recover_functor = new parallel_file_replay;
+      } else {
+        std::cout << "Invalid parallel replay mode: " << replay_mode << "\n";
+        abort();
+      }
       break;
 
     case 'p':
@@ -134,13 +145,12 @@ main(int argc, char **argv)
       break;
 
     case 'w':
-      warm_up_policy = new string(optarg);
-      if (*warm_up_policy == "eager")
-        sm_log::warm_up = sm_log::WU_EAGER;
-      else if (*warm_up_policy == "lazy")
-        sm_log::warm_up = sm_log::WU_LAZY;
+      if (strcmp(optarg, "eager") == 0)
+        sysconf::recovery_warm_up_policy = sysconf::WARM_UP_EAGER;
+      else if (strcmp(optarg, "lazy") == 0)
+        sysconf::recovery_warm_up_policy = sysconf::WARM_UP_LAZY;
       else
-        sm_log::warm_up = sm_log::WU_NONE;
+        sysconf::recovery_warm_up_policy = sysconf::WARM_UP_NONE;
       break;
 
     case 'n':
@@ -191,6 +201,11 @@ main(int argc, char **argv)
   else
     ALWAYS_ASSERT(false);
 
+  // parallel replay by oid partitions by default
+  if (not sysconf::recover_functor) {
+    sysconf::recover_functor = new parallel_oid_replay;
+  }
+
   sysconf::init();
   if (sysconf::log_dir.empty()) {
     cerr << "[ERROR] no log dir specified" << endl;
@@ -214,6 +229,8 @@ main(int argc, char **argv)
 #elif defined(SSN)
 #ifdef RC
     printf("System: RC+SSN\n");
+#elif defined RC_SPIN
+    printf("System: RC_SPIN+SSN\n");
 #else
     printf("System: SI+SSN\n");
 #endif
@@ -251,16 +268,17 @@ main(int argc, char **argv)
     cerr << "  log-dir     : " << sysconf::log_dir          << endl;
     cerr << "  log-segment-mb: " << sysconf::log_segment_mb   << endl;
     cerr << "  log-buffer-mb: " << sysconf::log_buffer_mb    << endl;
-    cerr << "  warm-up     : ";
-    if (sm_log::warm_up == sm_log::WU_NONE)
-      cerr << "0";
-    else if (sm_log::warm_up == sm_log::WU_LAZY)
+    cerr << "  recovery-warm-up: ";
+    if (sysconf::recovery_warm_up_policy == sysconf::WARM_UP_NONE)
+      cerr << "none";
+    else if (sysconf::recovery_warm_up_policy == sysconf::WARM_UP_LAZY)
       cerr << "lazy";
     else {
-      ALWAYS_ASSERT(sm_log::warm_up == sm_log::WU_EAGER);
+      ALWAYS_ASSERT(sysconf::recovery_warm_up_policy == sysconf::WARM_UP_EAGER);
       cerr << "eager";
     }
     cerr << endl;
+    cerr << "  parallel-recover-by: " << replay_mode         << endl;
     cerr << "  enable-chkpt    : " << enable_chkpt           << endl;
     cerr << "  enable-gc       : " << sysconf::enable_gc     << endl;
     cerr << "  null-log-device : " << sysconf::null_log_device << endl;

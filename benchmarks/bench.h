@@ -9,15 +9,17 @@
 
 #include "abstract_db.h"
 #include "../macros.h"
-#include "../thread.h"
 #include "../util.h"
 #include "../spinbarrier.h"
 #include "../dbcore/sm-config.h"
 #include "../dbcore/rcu.h"
+#include "../dbcore/serial.h"
 #include "../dbcore/sm-log.h"
 #include "../dbcore/sm-alloc.h"
-#include "../dbcore/serial.h"
+#include "../dbcore/sm-oid.h"
 #include "../dbcore/sm-rc.h"
+#include "../dbcore/sm-thread.h"
+
 #include <stdio.h>
 #include <sys/mman.h> // Needed for mlockall()
 #include <sys/time.h> // needed for getrusage
@@ -62,46 +64,29 @@ unique_filter(const std::vector<T> &v)
 	return ret;
 }
 
-class bench_loader : public ndb_thread {
+class bench_loader : public thread::sm_runner {
 public:
   bench_loader(unsigned long seed, abstract_db *db,
                const std::map<std::string, abstract_ordered_index *> &open_tables)
-    : r(seed), db(db), open_tables(open_tables), b(0)
+    : sm_runner(), r(seed), db(db), open_tables(open_tables)
   {
     txn_obj_buf.reserve(str_arena::MinStrReserveLength);
     txn_obj_buf.resize(db->sizeof_txn_object(txn_flags));
+    // don't try_instantiate() here; do it when we start to load. The way we reuse
+    // threads relies on this fact (see bench_runner::run()).
   }
-  inline void
-  set_barrier(spin_barrier &b)
-  {
-    ALWAYS_ASSERT(!this->b);
-    this->b = &b;
-  }
-  virtual void
-  run()
-  {
-#if defined(SSN) or defined(SSI)
-    TXN::assign_reader_bitmap_entry();
-#endif
-    // XXX. RCU register/deregister should be the outer most one b/c
-    // MM::deregister_thread could call cur_lsn inside
-	RCU::rcu_register();
-    MM::register_thread();
-    ALWAYS_ASSERT(b);
-    b->count_down();
-    b->wait_for();
-    load();
-    MM::deregister_thread();
-	RCU::rcu_deregister();
-#if defined(SSN) or defined(SSI)
-    TXN::deassign_reader_bitmap_entry();
-#endif
-    logmgr->set_tls_lsn_offset(~uint64_t{0});
-  }
+
+  virtual ~bench_loader() {}
   inline ALWAYS_INLINE varstr &
   str(uint64_t size)
   {
     return *arena.next(size);
+  }
+
+private:
+  virtual void my_work(char *)
+  {
+    load();
   }
 
 protected:
@@ -112,7 +97,6 @@ protected:
   util::fast_random r;
   abstract_db *const db;
   std::map<std::string, abstract_ordered_index *> open_tables;
-  spin_barrier *b;
   std::string txn_obj_buf;
   str_arena arena;
 };
@@ -120,14 +104,16 @@ protected:
 typedef std::tuple<uint64_t, uint64_t, uint64_t, uint64_t> tx_stat;
 typedef std::map<std::string, tx_stat> tx_stat_map;
 
-class bench_worker : public ndb_thread {
+class bench_worker : public thread::sm_runner {
+  friend class sm_log_alloc_mgr;
 public:
 
   bench_worker(unsigned int worker_id,
                unsigned long seed, abstract_db *db,
                const std::map<std::string, abstract_ordered_index *> &open_tables,
                spin_barrier *barrier_a, spin_barrier *barrier_b)
-    : worker_id(worker_id),
+    : sm_runner(),
+      worker_id(worker_id),
       r(seed), db(db), open_tables(open_tables),
       barrier_a(barrier_a), barrier_b(barrier_b),
       latency_numer_us(0),
@@ -145,9 +131,8 @@ public:
   {
     txn_obj_buf.reserve(str_arena::MinStrReserveLength);
     txn_obj_buf.resize(db->sizeof_txn_object(txn_flags));
+    try_impersonate();
   }
-
-  virtual ~bench_worker() {}
 
   typedef rc_t (*txn_fn_t)(bench_worker *);
 
@@ -166,8 +151,6 @@ public:
   typedef std::vector<workload_desc> workload_desc_vec;
   virtual workload_desc_vec get_workload() const = 0;
 
-  virtual void run();
-
   inline size_t get_ntxn_commits() const { return ntxn_commits; }
   inline size_t get_ntxn_aborts() const { return ntxn_aborts; }
   inline size_t get_ntxn_user_aborts() const { return ntxn_user_aborts; }
@@ -185,7 +168,7 @@ public:
   inline void inc_ntxn_phantom_aborts() { ++ntxn_phantom_aborts; }
   inline void inc_ntxn_query_commits() { ++ntxn_query_commits; }
 
-  inline uint64_t get_latency_numer_us() const { return latency_numer_us; }
+  inline uint64_t get_latency_numer_us() const { return volatile_read(latency_numer_us); }
 
   inline double
   get_avg_latency_us() const
@@ -206,9 +189,10 @@ public:
   }
 #endif
 
-protected:
+private:
+  virtual void my_work(char *);
 
-  virtual void on_run_setup() {}
+protected:
 
   inline void *txn_buf() { return (void *) txn_obj_buf.data(); }
 
@@ -244,6 +228,7 @@ protected:
 #endif
 
   std::vector<tx_stat> txn_counts; // commits and aborts breakdown
+
   std::string txn_obj_buf;
   str_arena arena;
 };
@@ -255,14 +240,13 @@ public:
   bench_runner &operator=(const bench_runner &) = delete;
 
   bench_runner(abstract_db *db)
-    : db(db), barrier_a(sysconf::worker_threads), barrier_b(1) {
-    // Pin somewhere so I can get memory (doing thsi here because
-    // some inheriting class (e.g., tpcc_bench_runner) might need
-    // memory in their ctor.
-    sysconf::pin_current_thread(sysconf::my_thread_id());
-  }
+    : db(db), barrier_a(sysconf::worker_threads), barrier_b(1) {}
   virtual ~bench_runner() {}
+  virtual void prepare(char *) = 0;
   void run();
+  void create_files_task(char *);
+
+  static std::vector<bench_worker*> workers;
 
 protected:
   // only called once

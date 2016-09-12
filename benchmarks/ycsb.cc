@@ -14,7 +14,6 @@
 #include <numa.h>
 
 #include "../macros.h"
-#include "../thread.h"
 #include "../util.h"
 #include "../spinbarrier.h"
 
@@ -158,13 +157,6 @@ public:
 
 protected:
 
-  virtual void
-  on_run_setup() override
-  {
-    const size_t b = worker_id % sysconf::worker_threads;
-    sysconf::pin_current_thread(b);
-  }
-
   inline ALWAYS_INLINE varstr&
   str(uint64_t size) {
     return *arena.next(size);
@@ -245,6 +237,10 @@ class ycsb_bench_runner : public bench_runner {
 public:
   ycsb_bench_runner(abstract_db *db)
     : bench_runner(db)
+  {
+  }
+
+  virtual void prepare(char *)
   {
     open_tables["USERTABLE"] = db->open_index("USERTABLE", kRecordSize);
   }

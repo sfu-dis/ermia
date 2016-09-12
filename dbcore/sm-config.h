@@ -5,6 +5,8 @@
 #include "sm-defs.h"
 #include "../macros.h"
 
+class sm_log_recover_impl;
+
 class sysconf {
 public:
     static uint32_t _active_threads;
@@ -23,7 +25,25 @@ public:
     static int log_segment_mb;
     static std::string log_dir;
     static int null_log_device;
+    static sm_log_recover_impl *recover_functor;
     static uint64_t node_memory_gb;
+
+    // Warm-up policy when recovering from a chkpt or the log.
+    // Set by --recovery-warm-up=[lazy/eager/whatever].
+    //
+    // lazy: spawn a thread to access every OID entry after recovery; log/chkpt
+    //       recovery will only oid_put objects that contain the records' log location.
+    //       Tx's might encounter some storage-resident versions, if the tx tried to
+    //       access them before the warm-up thread fetched those versions.
+    //
+    // eager: dig out versions from the log when scanning the chkpt and log; all OID
+    //        entries will point to some memory location after recovery finishes.
+    //        Txs will only see memory-residents, no need to dig them out during execution.
+    //
+    // --recovery-warm-up ommitted or = anything else: don't do warm-up at all; it
+    //        is the tx's burden to dig out versions when accessing them.
+    enum WU_POLICY { WARM_UP_NONE, WARM_UP_LAZY, WARM_UP_EAGER };
+    static int recovery_warm_up_policy;  // no/lazy/eager warm-up at recovery
 
     /* CC-related options */
     static int enable_ssi_read_only_opt;
@@ -47,13 +67,14 @@ public:
         return __id;
     }
 
-    inline static void pin_current_thread(size_t cpu) {
-        int node = cpu / sysconf::max_threads_per_node % sysconf::numa_nodes;
-        ALWAYS_ASSERT(node < sysconf::numa_nodes);
-        ALWAYS_ASSERT(!numa_run_on_node(node));
-        ALWAYS_ASSERT(!sched_yield());
+    inline static bool eager_warm_up() {
+        return recovery_warm_up_policy == WARM_UP_EAGER;
     }
-    
+
+    inline static bool lazy_warm_up() {
+        return recovery_warm_up_policy == WARM_UP_LAZY;
+    }
+
     static void init();
     static void sanity_check();
     static inline bool ssn_read_opt_enabled() {

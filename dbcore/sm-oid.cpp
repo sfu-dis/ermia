@@ -1,18 +1,21 @@
-#include "../util.h"
-#include "sm-oid-impl.h"
-#include "sm-alloc.h"
-#include "sm-chkpt.h"
-#include "sm-config.h"
-#include "sc-hash.h"
-#include "burt-hash.h"
-#include "../txn.h"
-#include <map>
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <map>
+
+#include "../util.h"
+#include "../txn.h"
+
+#include "burt-hash.h"
+#include "sc-hash.h"
+#include "sm-alloc.h"
+#include "sm-chkpt.h"
+#include "sm-config.h"
+#include "sm-file.h"
+#include "sm-log-recover-impl.h"
+#include "sm-oid-impl.h"
+
 sm_oid_mgr *oidmgr = NULL;
-// maps table name to its fid
-std::unordered_map<std::string, std::pair<FID, ndb_ordered_index *> > fid_map;
 
 namespace {
 #if 0
@@ -336,6 +339,11 @@ sm_oid_mgr_impl::recreate_file(FID f)
 void
 sm_oid_mgr_impl::recreate_allocator(FID f, OID m)
 {
+    static std::mutex recreate_lock;
+
+    recreate_lock.lock();
+    DEFER(recreate_lock.unlock());
+
     // Callers might be
     // 1. oidmgr when recovering from a chkpt
     // 2. logmgr when recovering from the log
@@ -523,7 +531,9 @@ sm_oid_mgr::create(LSN chkpt_start, sm_log_recover_mgr *lm)
         n = read(fd, &f, sizeof(FID));
 
         // Recover fid_map and recreate the empty file
-        fid_map.emplace(name, std::make_pair(f, (ndb_ordered_index *)NULL));
+        ASSERT(sm_file_mgr::get_index(name));
+        sm_file_mgr::name_map[name]->fid = f;
+        sm_file_mgr::fid_map[f] = new sm_file_descriptor(f, name, sm_file_mgr::get_index(name));
         ASSERT(not oidmgr->file_exists(f));
         oidmgr->recreate_file(f);
         printf("[Recovery.chkpt] FID=%d %s\n", f, name.c_str());
@@ -542,7 +552,7 @@ sm_oid_mgr::create(LSN chkpt_start, sm_log_recover_mgr *lm)
 
             fat_ptr ptr = NULL_PTR;
             n = read(fd, &ptr, sizeof(fat_ptr));
-            if (sm_log::warm_up == sm_log::WU_EAGER) {
+            if (sysconf::eager_warm_up()) {
                 ptr = object::create_tuple_object(ptr, NULL_PTR, 0, lm);
                 ASSERT(ptr.asi_type() == 0);
             }
@@ -575,8 +585,9 @@ sm_oid_mgr::take_chkpt(LSN cstart)
     //
     // The table's himark denotes its start and end
 
-    for (auto &fm : fid_map) {
-        FID fid = fm.second.first;
+    for (auto &fm : sm_file_mgr::fid_map) {
+        auto* fd = fm.second;
+        FID fid = fd->fid;
         // Find the high watermark of this file and dump its
         // backing store up to the size of the high watermark
         auto *alloc = get_impl(this)->get_allocator(fid);
@@ -586,10 +597,10 @@ sm_oid_mgr::take_chkpt(LSN cstart)
         chkptmgr->write_buffer(&himark, sizeof(OID));
 
         // [Name length, name, FID]
-        size_t len = fm.first.length();
+        size_t len = fd->name.length();
         chkptmgr->write_buffer(&len, sizeof(size_t));
-        chkptmgr->write_buffer((void *)fm.first.c_str(), len);
-        chkptmgr->write_buffer(&fm.second.first, sizeof(FID));
+        chkptmgr->write_buffer((void *)fd->name.c_str(), len);
+        chkptmgr->write_buffer(&fd->fid, sizeof(FID));
 
         // Now write the [OID, ptr] pairs
         for (OID oid = 0; oid < himark; oid++) {
@@ -619,7 +630,7 @@ sm_oid_mgr::take_chkpt(LSN cstart)
         }
         // Write himark as end of fid
         chkptmgr->write_buffer(&himark, sizeof(OID));
-        std::cout << "[Checkpoint] FID(" << fm.first << ") = "
+        std::cout << "[Checkpoint] FID(" << fd->fid << ") = "
                   << fid << ", himark = " << himark << std::endl;
     }
 
@@ -647,11 +658,11 @@ sm_oid_mgr::warm_up()
     {
         util::scoped_timer t("data warm-up");
         // Go over each OID entry and ensure_tuple there
-        for (auto &fm : fid_map) {
-            auto fid = fm.second.first;
-            auto *alloc = oidmgr->get_allocator(fid);
+        for (auto &fm : sm_file_mgr::fid_map) {
+            auto* fd = fm.second;
+            auto *alloc = oidmgr->get_allocator(fd->fid);
             OID himark = alloc->head.hiwater_mark;
-            oid_array *oa = oidmgr->get_array(fid);
+            oid_array *oa = oidmgr->get_array(fd->fid);
             for (OID oid = 0; oid < himark; oid++)
                 oidmgr->ensure_tuple(oa, oid, 0);
         }

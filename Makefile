@@ -113,15 +113,18 @@ DBCORE_SRCFILES = dbcore/burt-hash.cpp \
 	dbcore/sm-chkpt.cpp \
 	dbcore/sm-config.cpp \
 	dbcore/sm-log.cpp \
+	dbcore/sm-file.cpp \
 	dbcore/sm-tx-log.cpp \
 	dbcore/sm-log-alloc.cpp \
 	dbcore/sm-log-recover.cpp \
 	dbcore/sm-log-offset.cpp \
 	dbcore/sm-log-file.cpp \
+	dbcore/sm-log-recover-impl.cpp \
 	dbcore/sm-oid.cpp \
 	dbcore/sm-oid-alloc-impl.cpp \
 	dbcore/sm-exceptions.cpp \
 	dbcore/sm-common.cpp \
+	dbcore/sm-thread.cpp \
 	dbcore/window-buffer.cpp \
 	dbcore/rcu-slist.cpp \
 	dbcore/rcu.cpp \

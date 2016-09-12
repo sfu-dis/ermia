@@ -2,6 +2,8 @@
 #ifndef __SM_LOG_ALLOC_H
 #define __SM_LOG_ALLOC_H
 
+#include <deque>
+#include "../spinlock.h"
 #include "sm-log-recover.h"
 
 /* The log block allocator.
@@ -20,17 +22,17 @@
    between this log manager and the pieces it's built out of.
  */
 struct sm_log_alloc_mgr {
-    sm_log_alloc_mgr(sm_log_recover_function *rfn, void *rfn_arg);
+    sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg);
     
     ~sm_log_alloc_mgr();
 
     void set_tls_lsn_offset(uint64_t offset);
+    uint64_t get_tls_lsn_offset();
 
     /* Kick the log writer daemon and wait for it to finish flushing
      * the log buffer
      */
     LSN flush();
-    LSN flush_cur_lsn();
 
     /* Retrieve the current end of log
      */
@@ -38,7 +40,7 @@ struct sm_log_alloc_mgr {
 
     /* Retrieve the current durable end of log
      */
-    uint64_t dur_lsn_offset();
+    uint64_t dur_flushed_lsn_offset();
 
     /* Block the caller until the specified LSN offset has become durable
      */
@@ -72,11 +74,11 @@ struct sm_log_alloc_mgr {
 
     void _log_write_daemon();
     void _kick_log_write_daemon();
-    uint64_t latest_durable_lsn_offset();
-
+    segment_id *flush_log_buffer(window_buffer &logbuf, uint64_t new_dlsn_dlsn, bool update_dmark=false);
+    uint64_t smallest_tls_lsn_offset();
     sm_log_recover_mgr _lm;
     window_buffer _logbuf;
-    uint64_t _durable_lsn_offset;
+    uint64_t _durable_flushed_lsn_offset;
 
     pthread_t _write_daemon_tid;
     os_mutex _write_daemon_mutex;
@@ -120,8 +122,8 @@ struct sm_log_alloc_mgr {
     // lsn offset (corresponds to the log allocation block in the rcu-slist scheme) to its
     // own "tls" place, and the log flusher just scans all these tls places, then flush up
     // to the **smallest** lsn it found.
-    uint64_t _lsn_offset;
     uint64_t *_tls_lsn_offset;
+    uint64_t _lsn_offset CACHE_ALIGNED;
 };
 
 #endif

@@ -3,7 +3,7 @@
 #include "dbcore/sm-defs.h"
 
 /** options */
-#define SSN
+//#define SSN
 #ifdef SSN
 #define EARLY_SSN_CHECK // ssn checks during normal r/w
 #endif

@@ -5,7 +5,6 @@
 #include "macros.h"
 #include "varkey.h"
 #include "util.h"
-#include "thread.h"
 
 #include "reader_writer.h"
 #include "dbcore/xid.h"
