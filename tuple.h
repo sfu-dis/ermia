@@ -191,7 +191,7 @@ private:
   static inline ALWAYS_INLINE size_type
   CheckBounds(size_type s)
   {
-    INVARIANT(s <= std::numeric_limits<size_type>::max());
+    ASSERT(s <= std::numeric_limits<size_type>::max());
     return s;
   }
 

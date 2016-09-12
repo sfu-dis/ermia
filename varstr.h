@@ -119,14 +119,14 @@ public:
   inline varstr
   shift() const
   {
-    INVARIANT(l >= 8);
+    ASSERT(l >= 8);
     return varstr(p + 8, l - 8);
   }
 
   inline varstr
   shift_many(size_t n) const
   {
-    INVARIANT(l >= 8 * n);
+    ASSERT(l >= 8 * n);
     return varstr(p + 8 * n, l - 8 * n);
   }
 

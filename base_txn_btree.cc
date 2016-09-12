@@ -40,7 +40,7 @@ base_txn_btree::unsafe_purge(bool dump_stats)
 void
 base_txn_btree::purge_tree_walker::on_node_begin(const typename concurrent_btree::node_opaque_t *n)
 {
-    INVARIANT(spec_values.empty());
+    ASSERT(spec_values.empty());
     spec_values = concurrent_btree::ExtractValues(n);
 }
 
@@ -62,8 +62,8 @@ rc_t base_txn_btree::do_tree_put(
     const varstr *v,
     bool expect_new)
 {
-    INVARIANT(k);
-    INVARIANT(!expect_new || v); // makes little sense to remove() a key you expect
+    ASSERT(k);
+    ASSERT(!expect_new || v); // makes little sense to remove() a key you expect
                                  // to not be present, so we assert this doesn't happen
                                  // for now [since this would indicate a suboptimality]
     t.ensure_active();
@@ -188,7 +188,7 @@ rc_t base_txn_btree::do_tree_put(
         t.add_to_write_set(new_obj_ptr, this->underlying_btree.tuple_vec(), oid);
         ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_XID);
         ASSERT(oidmgr->oid_get_version(fid, oid, t.xc) == tuple);
-        INVARIANT(t.log);
+        ASSERT(t.log);
         if (not v)
             t.log->log_delete(this->fid, oid);
         else {

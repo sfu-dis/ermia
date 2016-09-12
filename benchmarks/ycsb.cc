@@ -159,7 +159,7 @@ public:
 protected:
 
   virtual void
-  on_run_setup() OVERRIDE
+  on_run_setup() override
   {
     const size_t b = worker_id % sysconf::worker_threads;
     sysconf::pin_current_thread(b);

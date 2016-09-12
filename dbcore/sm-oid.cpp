@@ -836,7 +836,7 @@ start_over:
 #endif
             goto start_over;
         }
-        INVARIANT(holder);
+        ASSERT(holder);
         auto state = volatile_read(holder->state);
         auto owner = volatile_read(holder->owner);
         holder = NULL; // use cached values instead!

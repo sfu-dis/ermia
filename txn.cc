@@ -72,7 +72,7 @@ transaction::~transaction()
 {
     // transaction shouldn't fall out of scope w/o resolution
     // resolution means TXN_EMBRYO, TXN_CMMTD, and TXN_ABRTD
-    INVARIANT(state() != TXN_ACTIVE && state() != TXN_COMMITTING);
+    ASSERT(state() != TXN_ACTIVE && state() != TXN_COMMITTING);
 #if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
     if (not sysconf::enable_safesnap or (not (flags & TXN_FLAG_READ_ONLY)))
         RCU::rcu_exit();
@@ -94,7 +94,7 @@ transaction::~transaction()
 }
 
 void
-transaction::abort()
+transaction::abort_impl()
 {
     // Mark the dirty tuple as invalid, for oid_get_version to
     // move on more quickly.
@@ -806,7 +806,7 @@ transaction::parallel_ssi_commit()
         }
         volatile_write(tuple->xstamp, cstamp);
         volatile_write(tuple->get_object()->_clsn, clsn.to_log_ptr());
-        INVARIANT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
+        ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one XCHG per tx
             enqueue_recycle_oids(w);
@@ -901,7 +901,7 @@ transaction::si_commit()
         ASSERT(w.oa);
         tuple->do_write();
         tuple->get_object()->_clsn = clsn.to_log_ptr();
-        INVARIANT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
+        ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         if (sysconf::enable_gc and tuple->next()) {
             // construct the (sub)list here so that we have only one XCHG per tx
             enqueue_recycle_oids(w);
@@ -950,7 +950,7 @@ transaction::try_insert_new_tuple(
     const varstr *value,
     FID fid)
 {
-    INVARIANT(key);
+    ASSERT(key);
     fat_ptr new_head = object::create_tuple_object(value, false, xc->begin_epoch);
     ASSERT(new_head.size_code() != INVALID_SIZE_CODE);
     dbtuple *tuple = ((object *)new_head.offset())->tuple();
@@ -966,7 +966,7 @@ transaction::try_insert_new_tuple(
 
 #ifdef PHANTOM_PROT_NODE_SET
     // update node #s
-    INVARIANT(ins_info.node);
+    ASSERT(ins_info.node);
     if (!absent_set.empty()) {
         auto it = absent_set.find(ins_info.node);
         if (it != absent_set.end()) {
@@ -984,7 +984,7 @@ transaction::try_insert_new_tuple(
 #endif
 
     // insert to log
-    INVARIANT(log);
+    ASSERT(log);
     ASSERT(tuple->size == value->size());
     auto record_size = align_up((size_t)tuple->size) + sizeof(varstr);
     auto size_code = encode_size_aligned(record_size);
@@ -1014,7 +1014,7 @@ transaction::try_insert_new_tuple(
 rc_t
 transaction::do_tuple_read(dbtuple *tuple, value_reader &value_reader)
 {
-    INVARIANT(tuple);
+    ASSERT(tuple);
     ASSERT(xc);
     bool read_my_own = (tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_XID);
     ASSERT(not read_my_own or (read_my_own and XID::from_ptr(volatile_read(tuple->get_object()->_clsn)) == xc->owner));
@@ -1045,7 +1045,7 @@ transaction::do_tuple_read(dbtuple *tuple, value_reader &value_reader)
         if (unlikely(stat == dbtuple::READ_FAILED))
             return rc_t{RC_ABORT_INTERNAL};
     }
-    INVARIANT(stat == dbtuple::READ_EMPTY || stat == dbtuple::READ_RECORD);
+    ASSERT(stat == dbtuple::READ_EMPTY || stat == dbtuple::READ_RECORD);
     if (stat == dbtuple::READ_EMPTY) {
         return rc_t{RC_FALSE};
     }
@@ -1058,7 +1058,7 @@ rc_t
 transaction::do_node_read(
     const typename concurrent_btree::node_opaque_t *n, uint64_t v)
 {
-    INVARIANT(n);
+    ASSERT(n);
     auto it = absent_set.find(n);
     if (it == absent_set.end())
         absent_set[n].version = v;

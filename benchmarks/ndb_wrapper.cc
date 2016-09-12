@@ -13,8 +13,8 @@
 ndb_wrapper::ndb_wrapper()
 {
   ALWAYS_ASSERT(sysconf::log_dir.size());
-  INVARIANT(!logmgr);
-  INVARIANT(!oidmgr);
+  ASSERT(!logmgr);
+  ASSERT(!oidmgr);
 
   RCU::rcu_register();
   RCU::rcu_enter();
@@ -65,7 +65,7 @@ ndb_wrapper::abort_txn(void *txn)
 {
   ndbtxn * const p = reinterpret_cast<ndbtxn *>(txn);
   auto t = (transaction *)&p->buf[0];
-  t->abort();
+  t->abort_impl();
   t->~transaction();
 }
 

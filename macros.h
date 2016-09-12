@@ -1,8 +1,9 @@
-#ifndef _MACROS_H_
-#define _MACROS_H_
+#pragma once
 
 #include <assert.h>
 #include <stdexcept>
+
+#include "dbcore/sm-defs.h"
 
 /** options */
 //#define USE_PARALLEL_SSN
@@ -29,7 +30,6 @@
 #define BTREE_NODE_PREFETCH
 //#define TRAP_LARGE_ALLOOCATIONS
 #define USE_BUILTIN_MEMFUNCS
-//#define CHECK_INVARIANTS
 #define BTREE_NODE_ALLOC_CACHE_ALIGNED
 #define TXN_BTREE_DUMP_PURGE_STATS
 //#define ENABLE_BENCH_TXN_COUNTERS
@@ -78,12 +78,6 @@
 #define VERBOSE(expr) ((void)0)
 //#define VERBOSE(expr) (expr)
 
-#ifdef CHECK_INVARIANTS
-  #define INVARIANT(expr) ALWAYS_ASSERT(expr)
-#else
-  #define INVARIANT(expr) ((void)0)
-#endif /* CHECK_INVARIANTS */
-
 // XXX: would be nice if we checked these during single threaded execution
 #define SINGLE_THREADED_INVARIANT(expr) ((void)0)
 
@@ -112,20 +106,5 @@
 #define NDB_MEMSET memset
 #endif
 
-#if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 7)
-#define GCC_AT_LEAST_47 1
-#else
-#define GCC_AT_LEAST_47 0
-#endif
-
-// g++-4.6 does not support override
-#if GCC_AT_LEAST_47
-#define OVERRIDE override
-#else
-#define OVERRIDE
-#endif
-
 // number of nanoseconds in 1 second (1e9)
 #define ONE_SECOND_NS 1000000000
-
-#endif /* _MACROS_H_ */

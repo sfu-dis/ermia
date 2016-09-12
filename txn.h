@@ -140,7 +140,7 @@ protected:
   {
     if (state() == TXN_EMBRYO)
       volatile_write(xc->state, TXN_ACTIVE);
-    INVARIANT(state() == TXN_ACTIVE);
+    ASSERT(state() == TXN_ACTIVE);
   }
 
   struct write_record_t {
@@ -183,7 +183,7 @@ public:
   bool check_phantom();
 #endif
 
-  void abort();
+  void abort_impl();
 
   void dump_debug_info() const;
 
