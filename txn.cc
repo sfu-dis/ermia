@@ -15,6 +15,13 @@ using namespace std;
 using namespace util;
 using namespace TXN;
 
+// XXX(tzwang): TLS read and write sets to avoid malloc -
+// much faster especially under high contention
+static __thread transaction::write_set_t* tls_write_set;
+#if defined(SSN) || defined(SSI)
+static __thread transaction::read_set_t* tls_read_set;
+#endif
+
 transaction::transaction(uint64_t flags, str_arena &sa)
   : flags(flags), sa(&sa)
 {
@@ -25,9 +32,19 @@ transaction::transaction(uint64_t flags, str_arena &sa)
     absent_set.set_empty_key(NULL);    // google dense map
     absent_set.clear();
 #endif
-    write_set.clear();
+    if (unlikely(not tls_write_set)) {
+        tls_write_set = new write_set_t;
+        tls_write_set->reserve(2000);
+    }
+    write_set = tls_write_set;
+    write_set->clear();
 #if defined(SSN) || defined(SSI)
-    read_set.clear();
+    if (unlikely(not tls_read_set)) {
+        tls_read_set = new read_set_t;
+        tls_read_set->reserve(2000);
+    }
+    read_set = tls_read_set;
+    read_set->clear();
 #endif
     updated_oids_head = updated_oids_tail = NULL_PTR;
     xid = TXN::xid_alloc();
@@ -110,7 +127,8 @@ transaction::abort_impl()
 #if defined(SSN) || defined(SSI)
     // Go over the read set first, to deregister from the tuple
     // asap so the updater won't wait for too long.
-    for (auto &r : read_set) {
+    for (uint32_t i = 0; i < read_set->size(); ++i) {
+        auto &r = (*read_set)[i];
         ASSERT(not r->is_defunct());
         ASSERT(r->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
         // remove myself from reader list
@@ -118,7 +136,8 @@ transaction::abort_impl()
     }
 #endif
 
-    for (auto &w : write_set) {
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+        auto &w = (*write_set)[i];
         dbtuple *tuple = w.get_object()->tuple();
         ASSERT(tuple);
         ASSERT(XID::from_ptr(tuple->get_object()->_clsn) == xid);
@@ -195,7 +214,7 @@ transaction::commit()
     // This is the same for both SSN and SSI.
     if (sysconf::enable_safesnap and (flags & TXN_FLAG_READ_ONLY)) {
         ASSERT(not log);
-        ASSERT(write_set.size() == 0);
+        ASSERT(write_set->size() == 0);
         xc->end = xc->begin;
         volatile_write(xc->state, TXN_CMMTD);
         return {RC_TRUE};
@@ -252,7 +271,8 @@ transaction::parallel_ssn_commit()
     // for writes, see if sb. has read the tuples - look at access lsn
 
     // Process reads first for a stable sstamp to be used for the read-optimization
-    for (auto &r : read_set) {
+    for (uint32_t i = 0; i < read_set->size(); ++i) {
+        auto &r = (*read_set)[i];
     try_get_sucessor:
         // so tuple should be the committed version I read
         ASSERT(r->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
@@ -298,7 +318,8 @@ transaction::parallel_ssn_commit()
         }
     }
 
-    for (auto &w : write_set) {
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+        auto &w = (*write_set)[i];
         dbtuple *tuple = w.get_object()->tuple();
         if (tuple->is_defunct())    // repeated overwrites
             continue;
@@ -484,7 +505,8 @@ transaction::parallel_ssn_commit()
     // post-commit: stuff access stamps for reads; init new versions
     auto clsn = xc->end;
     fat_ptr clsn_ptr = LSN::make(clsn, 0).to_log_ptr();
-    for (auto &w : write_set) {
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+        auto &w = (*write_set)[i];
         dbtuple *tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
             continue;
@@ -525,7 +547,8 @@ transaction::parallel_ssn_commit()
     // 3. Deregister from bitmap
     // Without 1, the updater might see a larger-than-it-should
     // xstamp and use it as its pstamp -> more unnecessary aborts
-    for (auto &r : read_set) {
+    for (uint32_t i = 0; i < read_set->size(); ++i) {
+        auto &r = (*read_set)[i];
         ASSERT(r->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
 
         // Spin to hold this position until the older successor is gone,
@@ -635,7 +658,8 @@ transaction::parallel_ssi_commit()
     // of T3 in the dangerous structure that clobbered our read)
     uint64_t ct3 = xc->ct3;   // this will be the s2 of versions I clobbered
 
-    for (auto &r : read_set) {
+    for (uint32_t i = 0; i < read_set->size(); ++i) {
+        auto &r = (*read_set)[i];
     get_overwriter:
         fat_ptr overwriter_clsn = volatile_read(r->sstamp);
         if (overwriter_clsn == NULL_PTR)
@@ -683,7 +707,8 @@ transaction::parallel_ssi_commit()
 
     if (ct3) {
         // now see if I'm the unlucky T2
-        for (auto &w : write_set) {
+        for (uint32_t i = 0; i < write_set->size(); ++i) {
+            auto &w = (*write_set)[i];
             if (w.get_object()->tuple()->is_defunct())
                 continue;
             dbtuple *overwritten_tuple = w.get_object()->tuple()->next();
@@ -787,7 +812,8 @@ transaction::parallel_ssi_commit()
     fat_ptr clsn_ptr = LSN::make(cstamp, 0).to_log_ptr();
     // stamp overwritten versions, stuff clsn
     auto clsn = xc->end;
-    for (auto &w : write_set) {
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+        auto &w = (*write_set)[i];
         dbtuple* tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
             continue;
@@ -821,7 +847,8 @@ transaction::parallel_ssi_commit()
     // Similar to SSN implementation, xstamp's availability depends solely
     // on when to deregister_reader_tx, not when to transitioning to the
     // "committed" state.
-    for (auto &r : read_set) {
+    for (uint32_t i = 0; i < read_set->size(); ++i) {
+        auto &r = (*read_set)[i];
         // Update xstamps in read versions, this should happen before
         // deregistering from the bitmap, so when the updater found a
         // context change, it'll get a stable xtamp from the tuple.
@@ -892,7 +919,8 @@ transaction::si_commit()
     // stuff clsn in tuples in write-set
     auto clsn = xc->end;
     fat_ptr clsn_ptr = LSN::make(clsn, 0).to_log_ptr();
-    for (auto &w : write_set) {
+    for (uint32_t i = 0; i < write_set->size(); ++i) {
+        auto &w = (*write_set)[i];
         dbtuple* tuple = w.get_object()->tuple();
         if (tuple->is_defunct())
             continue;
@@ -1105,7 +1133,7 @@ transaction::ssn_read(dbtuple *tuple)
             // successor of mine), so I need to update my \pi for the SSN check.
             // This is the easier case of anti-dependency (the other case is T1
             // already read a (then latest) version, then T2 comes to overwrite it).
-            read_set.emplace_back(tuple);
+            read_set->emplace_back(tuple);
         }
     }
 
@@ -1128,8 +1156,9 @@ transaction::ssi_read(dbtuple *tuple)
     if (volatile_read(tuple->s2)) {
         // Read-only optimization: s2 is not a problem if we're read-only and
         // my begin ts is earlier than s2.
-        if (not ((sysconf::enable_ssi_read_only_opt and write_set.size() == 0) and
-                 xc->begin < tuple->s2)) {
+        if (not sysconf::enable_ssi_read_only_opt or
+            write_set->size() > 0 or
+            xc->begin >= tuple->s2) {
             // sstamp will be valid too if s2 is valid
             ASSERT(tuple->sstamp.asi_type() == fat_ptr::ASI_LOG);
             return rc_t{RC_ABORT_SERIAL};
@@ -1156,7 +1185,7 @@ transaction::ssi_read(dbtuple *tuple)
         // survived, register as a reader
         // After this point, I'll be visible to the updater (if any)
         serial_register_reader_tx(xc->owner, &tuple->readers_bitmap);
-        read_set.emplace_back(tuple);
+        read_set->emplace_back(tuple);
     }
     return {RC_TRUE};
 }
