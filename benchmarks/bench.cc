@@ -64,7 +64,7 @@ map_agg(map<K, V> &agg, const map<K, V> &m)
 void
 bench_worker::run()
 {
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     TXN::assign_reader_bitmap_entry();
 #endif
     // XXX. RCU register/deregister should be the outer most one b/c
@@ -130,7 +130,7 @@ retry:
 	}
     MM::deregister_thread();
     RCU::rcu_deregister();
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     TXN::deassign_reader_bitmap_entry();
 #endif
 }

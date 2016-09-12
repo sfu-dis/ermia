@@ -1,14 +1,11 @@
 #pragma once
 
-#include <assert.h>
-#include <stdexcept>
-
 #include "dbcore/sm-defs.h"
 
 /** options */
-//#define USE_PARALLEL_SSN
-#ifdef USE_PARALLEL_SSN
-#define DO_EARLY_SSN_CHECKS // ssn checks during normal r/w
+#define SSN
+#ifdef SSN
+#define EARLY_SSN_CHECK // ssn checks during normal r/w
 #endif
 
 //#define USE_READ_COMMITTED
@@ -16,19 +13,18 @@
 //#define READ_COMMITTED_SPIN // spin until the tx is settled when hit an XID
 //#endif
 
-//#define USE_PARALLEL_SSI
+//#define SSI
 
-#if defined(USE_PARALLEL_SSI) && defined(USE_PARALLEL_SSN)
+#if defined(SSI) && defined(SSN)
 #error "can't use SSI and SSN together."
 #endif
 
-#define PHANTOM_PROT_NODE_SET   // silo's phantom protection scheme
+//#define PHANTOM_PROT
 
 //#define USE_DYNARRAY_STR_ARENA
 
 //#define TUPLE_PREFETCH
 #define BTREE_NODE_PREFETCH
-//#define TRAP_LARGE_ALLOOCATIONS
 #define USE_BUILTIN_MEMFUNCS
 #define BTREE_NODE_ALLOC_CACHE_ALIGNED
 #define TXN_BTREE_DUMP_PURGE_STATS
@@ -37,8 +33,6 @@
 //#define DISABLE_FIELD_SELECTION
 //#define PARANOID_CHECKING
 //#define BTREE_LOCK_OWNERSHIP_CHECKING
-//#define MEMCHECK_MAGIC 0xFF
-//#define USE_PERF_CTRS
 
 #ifndef CONFIG_H
 #error "no CONFIG_H set"
@@ -70,16 +64,13 @@
 #ifdef NDEBUG
   #define ALWAYS_ASSERT(expr) (likely((expr)) ? (void)0 : abort())
 #else
-  #define ALWAYS_ASSERT(expr) assert((expr))
+  #define ALWAYS_ASSERT(expr) ASSERT((expr))
 #endif /* NDEBUG */
 
 #define ARRAY_NELEMS(a) (sizeof(a)/sizeof((a)[0]))
 
 #define VERBOSE(expr) ((void)0)
 //#define VERBOSE(expr) (expr)
-
-// XXX: would be nice if we checked these during single threaded execution
-#define SINGLE_THREADED_INVARIANT(expr) ((void)0)
 
 // tune away
 #define SMALL_SIZE_VEC       128
@@ -105,6 +96,3 @@
 #define NDB_MEMCPY memcpy
 #define NDB_MEMSET memset
 #endif
-
-// number of nanoseconds in 1 second (1e9)
-#define ONE_SECOND_NS 1000000000

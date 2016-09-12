@@ -21,19 +21,19 @@ transaction::transaction(uint64_t flags, str_arena &sa)
 #ifdef BTREE_LOCK_OWNERSHIP_CHECKING
     concurrent_btree::NodeLockRegionBegin();
 #endif
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     absent_set.set_empty_key(NULL);    // google dense map
     absent_set.clear();
 #endif
     write_set.clear();
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     read_set.clear();
 #endif
     updated_oids_head = updated_oids_tail = NULL_PTR;
     xid = TXN::xid_alloc();
     xc = xid_get_context(xid);
     xc->begin_epoch = MM::epoch_enter();
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     xc->xct = this;
     // If there's a safesnap, then SSN treats the snapshot as a transaction
     // that has read all the versions, which means every update transaction
@@ -62,9 +62,9 @@ transaction::transaction(uint64_t flags, str_arena &sa)
         // to update the same tuple with latest version stamped at cur_lsn()
         // but no one can succeed (because version.clsn == cur_lsn == t.begin).
         xc->begin = logmgr->cur_lsn().offset() + 1;
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
         xc->pstamp = volatile_read(MM::safesnap_lsn);
-#elif defined(USE_PARALLEL_SSI)
+#elif defined(SSI)
         xc->last_safesnap = volatile_read(MM::safesnap_lsn);
 #endif
     }
@@ -80,7 +80,7 @@ transaction::~transaction()
     // transaction shouldn't fall out of scope w/o resolution
     // resolution means TXN_CMMTD, and TXN_ABRTD
     ASSERT(state() != TXN_ACTIVE && state() != TXN_COMMITTING);
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     if (not sysconf::enable_safesnap or (not (flags & TXN_FLAG_READ_ONLY)))
         RCU::rcu_exit();
 #else
@@ -89,7 +89,7 @@ transaction::~transaction()
 #ifdef BTREE_LOCK_OWNERSHIP_CHECKING
     concurrent_btree::AssertAllNodeLocksReleased();
 #endif
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     if (not sysconf::enable_safesnap or (not (flags & TXN_FLAG_READ_ONLY)))
         serial_deregister_tx(xid);
 #endif
@@ -107,7 +107,7 @@ transaction::abort_impl()
     // move on more quickly.
     volatile_write(xc->state, TXN_ABRTD);
 
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     // Go over the read set first, to deregister from the tuple
     // asap so the updater won't wait for too long.
     for (auto &r : read_set) {
@@ -125,7 +125,7 @@ transaction::abort_impl()
         if (tuple->is_defunct()) {   // for repeated overwrites
             continue;  // should have already called deallocate() during the update
         }
-#if defined(USE_PARALLEL_SSI) || defined(USE_PARALLEL_SSN)
+#if defined(SSI) || defined(SSN)
         if (tuple->next()) {
             volatile_write(tuple->next()->sstamp, NULL_PTR);
             tuple->next()->welcome_readers();
@@ -189,7 +189,7 @@ transaction::commit()
 {
     ALWAYS_ASSERT(state() == TXN_ACTIVE);
     volatile_write(xc->state, TXN_COMMITTING);
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
     // Safe snapshot optimization for read-only transactions:
     // Use the begin ts as cstamp if it's a read-only transaction
     // This is the same for both SSN and SSI.
@@ -205,9 +205,9 @@ transaction::commit()
         xc->end = log->pre_commit().offset();
         if (xc->end == 0)
             return rc_t{RC_ABORT_INTERNAL};
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
         return parallel_ssn_commit();
-#elif defined USE_PARALLEL_SSI
+#elif defined SSI
         return parallel_ssi_commit();
 #endif
     }
@@ -216,7 +216,7 @@ transaction::commit()
 #endif
 }
 
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
 #define set_tuple_xstamp(tuple, s)    \
 {   \
     uint64_t x;  \
@@ -227,7 +227,7 @@ transaction::commit()
 }
 #endif
 
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
 rc_t
 transaction::parallel_ssn_commit()
 {
@@ -457,7 +457,7 @@ transaction::parallel_ssn_commit()
     if (not ssn_check_exclusion(xc))
         return rc_t{RC_ABORT_SERIAL};
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     if (not check_phantom())
         return rc_t{RC_ABORT_PHANTOM};
 #endif
@@ -567,7 +567,7 @@ transaction::parallel_ssn_commit()
 
     return rc_t{RC_TRUE};
 }
-#elif defined(USE_PARALLEL_SSI)
+#elif defined(SSI)
 rc_t
 transaction::parallel_ssi_commit()
 {
@@ -776,7 +776,7 @@ transaction::parallel_ssi_commit()
         }
     }
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     if (not check_phantom())
         return rc_t{RC_ABORT_PHANTOM};
 #endif
@@ -880,7 +880,7 @@ transaction::si_commit()
     if (xc->end == 0)
         return rc_t{RC_ABORT_INTERNAL};
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     if (not check_phantom())
         return rc_t{RC_ABORT_PHANTOM};
 #endif
@@ -927,7 +927,7 @@ transaction::si_commit()
 }
 #endif
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
 // returns true if btree versions have changed, ie there's phantom
 bool
 transaction::check_phantom()
@@ -955,14 +955,14 @@ transaction::try_insert_new_tuple(
     ASSERT(decode_size_aligned(new_head.size_code()) >= tuple->size);
     tuple->get_object()->_clsn = xid.to_ptr();
     OID oid = oidmgr->alloc_oid(fid);
-    oidmgr->oid_put_new(btr->tuple_vec(), oid, new_head);
+    oidmgr->oid_put_new(btr->get_oid_array(), oid, new_head);
     typename concurrent_btree::insert_info_t ins_info;
     if (unlikely(!btr->insert_if_absent(varkey(key), oid, tuple, xc, &ins_info))) {
-        oidmgr->oid_unlink(btr->tuple_vec(), oid, tuple);
+        oidmgr->oid_unlink(btr->get_oid_array(), oid, tuple);
         return false;
     }
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
     // update node #s
     ASSERT(ins_info.node);
     if (!absent_set.empty()) {
@@ -971,12 +971,11 @@ transaction::try_insert_new_tuple(
             if (unlikely(it->second.version != ins_info.old_version)) {
                 // important: unlink the version, otherwise we risk leaving a dead
                 // version at chain head -> infinite loop or segfault...
-                oidmgr->oid_unlink(btr->tuple_vec(), oid, tuple);
+                oidmgr->oid_unlink(btr->get_oid_array(), oid, tuple);
                 return false;
             }
             // otherwise, bump the version
             it->second.version = ins_info.new_version;
-            SINGLE_THREADED_INVARIANT(concurrent_btree::ExtractVersionNumber(it->first) == it->second);
         }
     }
 #endif
@@ -1005,7 +1004,7 @@ transaction::try_insert_new_tuple(
 
     // update write_set
     ASSERT(tuple->pvalue->size() == tuple->size);
-    add_to_write_set(new_head, btr->tuple_vec(), oid);
+    add_to_write_set(new_head, btr->get_oid_array(), oid);
     return true;
 }
 
@@ -1018,13 +1017,13 @@ transaction::do_tuple_read(dbtuple *tuple, value_reader &value_reader)
     ASSERT(not read_my_own or (read_my_own and XID::from_ptr(volatile_read(tuple->get_object()->_clsn)) == xc->owner));
     ASSERT(not read_my_own or not(flags & TXN_FLAG_READ_ONLY));
 
-#if defined(USE_PARALLEL_SSI) || defined(USE_PARALLEL_SSN)
+#if defined(SSI) || defined(SSN)
     if (not read_my_own) {
         rc_t rc = {RC_INVALID};
         if (sysconf::enable_safesnap and (flags & TXN_FLAG_READ_ONLY))
             rc = {RC_TRUE};
         else {
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
             rc = ssn_read(tuple);
 #else
             rc = ssi_read(tuple);
@@ -1051,7 +1050,7 @@ transaction::do_tuple_read(dbtuple *tuple, value_reader &value_reader)
     return {RC_TRUE};
 }
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
 rc_t
 transaction::do_node_read(
     const typename concurrent_btree::node_opaque_t *n, uint64_t v)
@@ -1066,7 +1065,7 @@ transaction::do_node_read(
 }
 #endif
 
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
 rc_t
 transaction::ssn_read(dbtuple *tuple)
 {
@@ -1110,7 +1109,7 @@ transaction::ssn_read(dbtuple *tuple)
         }
     }
 
-#ifdef DO_EARLY_SSN_CHECKS
+#ifdef EARLY_SSN_CHECK
     if (not ssn_check_exclusion(xc))
         return {RC_ABORT_SERIAL};
 #endif
@@ -1118,7 +1117,7 @@ transaction::ssn_read(dbtuple *tuple)
 }
 #endif
 
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
 rc_t
 transaction::ssi_read(dbtuple *tuple)
 {

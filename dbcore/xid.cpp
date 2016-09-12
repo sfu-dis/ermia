@@ -188,7 +188,7 @@ xid_alloc()
 
     return take_one(&tls);
 }
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
 bool
 xid_context::set_sstamp(uint64_t s) {
     ALWAYS_ASSERT(!(s & xid_context::sstamp_final_mark));

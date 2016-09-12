@@ -37,14 +37,22 @@ public:
       fid(fid),
       been_destructed(false)
   {
-    underlying_btree.set_tuple_vec(oidmgr->get_array(fid));
-    ALWAYS_ASSERT(fid and this->fid);
   }
 
   ~base_txn_btree()
   {
     if (!been_destructed)
       unsafe_purge(false);
+  }
+
+  inline void set_oid_array(FID f)
+  {
+    fid = f;
+    underlying_btree.set_oid_array(oidmgr->get_array(f));
+  }
+
+  inline oid_array* get_oid_array() {
+    return underlying_btree.get_oid_array();
   }
 
   inline size_t

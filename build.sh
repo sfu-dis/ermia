@@ -1,1 +1,1 @@
-MODE=perf DEBUG=$1 CHECK_INVARIANTS=$1 make -j10 dbtest
+MODE=perf DEBUG=$1 CHECK_INVARIANTS=$1 make -j20 dbtest

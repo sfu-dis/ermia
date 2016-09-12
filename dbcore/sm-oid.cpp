@@ -1039,7 +1039,7 @@ start_over:
                 ASSERT(volatile_read(holder->end));
                 ASSERT(owner == holder_xid);
 #ifdef USE_READ_COMMITTED
-#if defined(USE_PARALLEL_SSI) || defined(USE_PARALLEL_SSN)
+#if defined(SSI) || defined(SSN)
                 if (sysconf::enable_safesnap and visitor_xc->xct->flags & transaction::TXN_FLAG_READ_ONLY) {
                     if (holder->end < visitor_xc->begin) {
                         return cur_obj->tuple();
@@ -1055,7 +1055,7 @@ start_over:
                 if (holder->end < visitor_xc->begin) {
                     return cur_obj->tuple();
                 }
-#if defined(USE_PARALLEL_SSI) or defined(USE_PARALLEL_SSN)
+#if defined(SSI) or defined(SSN)
                 else {
                     oid_check_phantom(visitor_xc, holder->end);
                 }
@@ -1072,7 +1072,7 @@ start_over:
         }
         else if (clsn.asi_type() == fat_ptr::ASI_LOG) {
 #ifdef USE_READ_COMMITTED
-#if defined(USE_PARALLEL_SSI) || defined(USE_PARALLEL_SSN)
+#if defined(SSI) || defined(SSN)
             if (sysconf::enable_safesnap and visitor_xc->xct->flags & transaction::TXN_FLAG_READ_ONLY) {
                 if (LSN::from_ptr(clsn) <= visitor_xc->begin)
                     return cur_obj->tuple();
@@ -1086,7 +1086,7 @@ start_over:
             if (LSN::from_ptr(clsn).offset() <= visitor_xc->begin) {
                 return cur_obj->tuple();
             }
-#if defined(USE_PARALLEL_SSI) or defined(USE_PARALLEL_SSN)
+#if defined(SSI) or defined(SSN)
             else {
                 oid_check_phantom(visitor_xc, clsn.offset());
             }
@@ -1129,15 +1129,15 @@ sm_oid_mgr::oid_check_phantom(xid_context *visitor_xc, uint64_t vcstamp) {
    * successor updated our read set. For SSI, this translates to updating
    * ct3; for SSN, update the visitor's sstamp.
    */
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
   auto vct3 = volatile_read(visitor_xc->ct3);
   if (not vct3 or vct3 > vcstamp) {
       volatile_write(visitor_xc->ct3, vcstamp);
   }
-#elif defined USE_PARALLEL_SSN
+#elif defined SSN
   visitor_xc->set_sstamp(std::min(visitor_xc->sstamp.load(), vcstamp));
   // TODO(tzwang): do early SSN check here
-#endif  // USE_PARALLEL_SSI/SSN
+#endif  // SSI/SSN
 }
 
 void

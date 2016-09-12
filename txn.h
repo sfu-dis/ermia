@@ -155,7 +155,7 @@ protected:
 
   typedef std::vector<write_record_t> write_set_map;
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
   // the absent set is a mapping from (btree_node -> version_number).
   struct absent_record_t { uint64_t version; };
   typedef dense_hash_map<const concurrent_btree::node_opaque_t*, absent_record_t> absent_set_map;
@@ -168,17 +168,17 @@ public:
   ~transaction();
 
   rc_t commit();
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
   rc_t parallel_ssn_commit();
   rc_t ssn_read(dbtuple *tuple);
-#elif defined USE_PARALLEL_SSI
+#elif defined SSI
   rc_t parallel_ssi_commit();
   rc_t ssi_read(dbtuple *tuple);
 #else
   rc_t si_commit();
 #endif
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
   bool check_phantom();
 #endif
 
@@ -199,7 +199,7 @@ protected:
   rc_t
   do_tuple_read(dbtuple *tuple, value_reader &value_reader);
 
-#ifdef PHANTOM_PROT_NODE_SET
+#ifdef PHANTOM_PROT
   rc_t
   do_node_read(const typename concurrent_btree::node_opaque_t *n, uint64_t version);
 #endif
@@ -255,7 +255,7 @@ protected:
   sm_tx_log* log;
   str_arena *sa;
   write_set_map write_set;
-#if defined(USE_PARALLEL_SSN) || defined(USE_PARALLEL_SSI)
+#if defined(SSN) || defined(SSI)
   typedef std::vector<dbtuple *> read_set_map;
   read_set_map read_set;
 #endif

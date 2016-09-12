@@ -19,20 +19,20 @@ struct xid_context {
     XID owner;
     uint64_t begin;
     uint64_t end;
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
     uint64_t pstamp; // youngest predecessor (\eta)
     std::atomic<uint64_t> sstamp; // oldest successor (\pi)
     transaction *xct;
     bool set_sstamp(uint64_t s);
 #endif
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
     uint64_t ct3;   // smallest commit stamp of T3 in the dangerous structure
     uint64_t last_safesnap;
     transaction *xct;
 #endif
     txn_state state;
 
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
 const static uint64_t sstamp_final_mark = 1UL << 63;
 inline void finalize_sstamp() {
     std::atomic_fetch_or(&sstamp, sstamp_final_mark);
@@ -113,12 +113,12 @@ inline XID take_one(thread_data *t)
     DEFER(t->bitmap &= (t->bitmap-1));
     auto id = t->base_id + __builtin_ctzll(t->bitmap);
     auto x = contexts[id].owner = XID::make(t->epoch, id);
-#ifdef USE_PARALLEL_SSN
+#ifdef SSN
     contexts[id].sstamp = 0;
     contexts[id].pstamp = 0;
     contexts[id].xct = NULL;
 #endif
-#ifdef USE_PARALLEL_SSI
+#ifdef SSI
     contexts[id].ct3 = 0;
     contexts[id].last_safesnap = 0;
     contexts[id].xct = NULL;
@@ -129,7 +129,7 @@ inline XID take_one(thread_data *t)
     contexts[id].state = TXN_ACTIVE;
     return x;
 }
-#if defined(USE_PARALLEL_SSN) or defined(USE_PARALLEL_SSI)
+#if defined(SSN) or defined(SSI)
 inline txn_state spin_for_cstamp(XID xid, xid_context *xc) {
     txn_state state;
     do {
