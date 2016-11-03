@@ -32,13 +32,13 @@ namespace {
 void
 sm_log_alloc_mgr::set_tls_lsn_offset(uint64_t offset)
 {
-    volatile_write(_tls_lsn_offset[sysconf::my_thread_id()], offset);
+    volatile_write(_tls_lsn_offset[thread::my_id()], offset);
 }
 
 uint64_t
 sm_log_alloc_mgr::get_tls_lsn_offset()
 {
-    return volatile_read(_tls_lsn_offset[sysconf::my_thread_id()]);
+    return volatile_read(_tls_lsn_offset[thread::my_id()]);
 }
 
 /* We have to find the end of the log files on disk before
@@ -57,7 +57,6 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
     , _write_daemon_should_stop(false)
     , _lsn_offset(_lm.get_durable_mark().offset())
 {
-    sysconf::_active_threads = 0;
     _tls_lsn_offset = (uint64_t *)malloc(sizeof(uint64_t) * sysconf::MAX_THREADS);
     memset(_tls_lsn_offset, 0, sizeof(uint64_t) * sysconf::MAX_THREADS);
 
@@ -458,7 +457,7 @@ uint64_t
 sm_log_alloc_mgr::smallest_tls_lsn_offset()
 {
     uint64_t oldest_offset = cur_lsn_offset();
-    for (uint32_t i = 0; i < sysconf::_active_threads; i++) {
+    for (uint32_t i = 0; i < thread::next_thread_id; i++) {
         if (_tls_lsn_offset[i])
             oldest_offset = std::min(_tls_lsn_offset[i], oldest_offset);
     }

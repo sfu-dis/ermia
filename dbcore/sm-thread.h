@@ -12,6 +12,19 @@
 
 namespace thread {
 
+extern uint32_t next_thread_id;  // == total number of threads had so far - never decreases
+extern __thread uint32_t thread_id;
+extern __thread bool thread_initialized;
+
+inline uint32_t my_id() {
+  if (!thread_initialized) {
+    thread_id = __sync_fetch_and_add(&next_thread_id, 1);
+    thread_initialized = true;
+    std::cout << "New thread " << thread_id << std::endl;
+  }
+  return thread_id;
+}
+
 struct sm_thread {
   const uint8_t kStateHasWork = 1U;
   const uint8_t kStateSleep   = 2U;
@@ -21,7 +34,6 @@ struct sm_thread {
   std::thread thd;
   uint16_t node;
   uint16_t core;
-  XID current_xid;
   bool shutdown;
   uint8_t state;
   task_t task;
@@ -33,7 +45,6 @@ struct sm_thread {
   sm_thread(uint16_t n, uint16_t c) :
     node(n),
     core(c),
-    current_xid(INVALID_XID),
     shutdown(false),
     state(kStateNoWork),
     task(nullptr) {
@@ -89,13 +100,11 @@ struct node_thread_pool {
       goto retry;
     }
     ALWAYS_ASSERT(pos < sysconf::max_threads_per_node);
-    //std::cout << "get_thread(): node " << threads[pos].node << ", " << pos << std::endl;
     return threads + pos;
   }
 
   inline void put_thread(sm_thread *t) {
     auto b = ~uint64_t{1UL << (t - threads)};
-    //std::cout << "put_thread(): node " << t->node << ", " << t->core << std::endl;
     __sync_fetch_and_and(&bitmap, b);
   }
 
