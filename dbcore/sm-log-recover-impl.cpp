@@ -15,14 +15,14 @@ sm_log_recover_impl::recover_prepare_version(sm_log_scan_mgr::record_scan *logre
   // Note: payload_size() includes the whole varstr
   // See do_tree_put's log_update call.
   size_t sz = sizeof(object);
-  if (sysconf::eager_warm_up()) {
+  if (config::eager_warm_up()) {
     sz += (sizeof(dbtuple) + logrec->payload_size());
     sz = align_up(sz);
   }
 
   object *obj = new (MM::allocate(sz, 0)) object(logrec->payload_ptr(), next, 0);
 
-  if (not sysconf::eager_warm_up())
+  if (not config::eager_warm_up())
     return fat_ptr::make(obj, INVALID_SIZE_CODE, fat_ptr::ASI_LOG_FLAG);
 
   // Load tuple varstr from logrec
@@ -190,7 +190,7 @@ parallel_file_replay::operator()(void *arg, sm_log_scan_mgr *s, LSN from, LSN to
   FID max_fid = 0;
   static std::vector<struct redo_runner> redoers;
   if (redoers.size() == 0) {
-    auto *scan = scanner->new_log_scan(start_lsn, sysconf::eager_warm_up());
+    auto *scan = scanner->new_log_scan(start_lsn, config::eager_warm_up());
     for (; scan->valid() and scan->payload_lsn() < end_lsn; scan->next()) {
       if (scan->type() != sm_log_scan_mgr::LOG_FID)
         continue;
@@ -249,7 +249,7 @@ process:
   // For easier measurement (like "how long does it take to bring the
   // system back to fully memory-resident after recovery), we spawn the
   // warm-up thread after rebuilding indexes as well.
-  if (sysconf::lazy_warm_up()) {
+  if (config::lazy_warm_up()) {
     oidmgr->start_warm_up();
   }
 
@@ -281,7 +281,7 @@ parallel_file_replay::redo_runner::redo_file() {
   RCU::rcu_enter();
   OID himark = 0;
   uint64_t icount = 0, ucount = 0, size = 0, iicount = 0, dcount = 0;
-  auto *scan = owner->scanner->new_log_scan(owner->start_lsn, sysconf::eager_warm_up());
+  auto *scan = owner->scanner->new_log_scan(owner->start_lsn, config::eager_warm_up());
   for (; scan->valid() and scan->payload_lsn() < owner->end_lsn; scan->next()) {
     auto f = scan->fid();
     if (f != fid)
@@ -347,7 +347,7 @@ parallel_oid_replay::operator()(void *arg, sm_log_scan_mgr *s, LSN from, LSN to)
   // One hiwater_mark/capacity_mark per FID
   FID max_fid = 0;
   if (redoers.size() == 0) {
-    auto *scan = scanner->new_log_scan(start_lsn, sysconf::eager_warm_up());
+    auto *scan = scanner->new_log_scan(start_lsn, config::eager_warm_up());
     for (; scan->valid() and scan->payload_lsn() < end_lsn; scan->next()) {
       if (scan->type() != sm_log_scan_mgr::LOG_FID)
         continue;
@@ -403,7 +403,7 @@ process:
   // For easier measurement (like "how long does it take to bring the
   // system back to fully memory-resident after recovery), we spawn the
   // warm-up thread after rebuilding indexes as well.
-  if (sysconf::lazy_warm_up()) {
+  if (config::lazy_warm_up()) {
     oidmgr->start_warm_up();
   }
 
@@ -415,7 +415,7 @@ parallel_oid_replay::redo_runner::redo_partition() {
   util::scoped_timer t("redo_partition");
   RCU::rcu_enter();
   uint64_t icount = 0, ucount = 0, size = 0, iicount = 0, dcount = 0;
-  auto *scan = owner->scanner->new_log_scan(owner->start_lsn, sysconf::eager_warm_up());
+  auto *scan = owner->scanner->new_log_scan(owner->start_lsn, config::eager_warm_up());
   static __thread std::unordered_map<FID, OID> max_oid;
 
   for (; scan->valid() and scan->payload_lsn() < owner->end_lsn; scan->next()) {

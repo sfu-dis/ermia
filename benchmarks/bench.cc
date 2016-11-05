@@ -129,11 +129,11 @@ retry:
 void
 bench_runner::create_files_task(char *)
 {
-  ALWAYS_ASSERT(sysconf::log_dir.size());
+  ALWAYS_ASSERT(config::log_dir.size());
   ALWAYS_ASSERT(not logmgr);
   ALWAYS_ASSERT(not oidmgr);
   RCU::rcu_enter();
-  logmgr = sm_log::new_log(sysconf::recover_functor, nullptr);
+  logmgr = sm_log::new_log(config::recover_functor, nullptr);
   ASSERT(oidmgr);
   RCU::rcu_exit();
 
@@ -211,7 +211,7 @@ bench_runner::run()
     RCU::rcu_deregister();
   }
 
-  volatile_write(sysconf::loading, false);
+  volatile_write(config::loading, false);
 
   map<string, size_t> table_sizes_before;
 
@@ -252,7 +252,7 @@ bench_runner::run()
       while (slept < runtime) {
         sleep(1);
         uint64_t sec_commits = 0, sec_aborts = 0;
-        for (size_t i = 0; i < sysconf::worker_threads; i++) {
+        for (size_t i = 0; i < config::worker_threads; i++) {
           sec_commits += workers[i]->get_ntxn_commits();
           sec_aborts += workers[i]->get_ntxn_aborts();
         }
@@ -274,7 +274,7 @@ bench_runner::run()
   logmgr->flush();
 
   __sync_synchronize();
-  for (size_t i = 0; i < sysconf::worker_threads; i++)
+  for (size_t i = 0; i < config::worker_threads; i++)
     workers[i]->join();
   const unsigned long elapsed_nosync = t_nosync.lap();
   size_t n_commits = 0;
@@ -287,7 +287,7 @@ bench_runner::run()
   size_t n_phantom_aborts = 0;
   size_t n_query_commits= 0;
   uint64_t latency_numer_us = 0;
-  for (size_t i = 0; i < sysconf::worker_threads; i++) {
+  for (size_t i = 0; i < config::worker_threads; i++) {
     n_commits += workers[i]->get_ntxn_commits();
     n_aborts += workers[i]->get_ntxn_aborts();
     n_int_aborts += workers[i]->get_ntxn_int_aborts();

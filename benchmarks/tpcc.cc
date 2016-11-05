@@ -243,13 +243,13 @@ PartitionId(unsigned int wid)
 {
   ASSERT(wid >= 1 && wid <= NumWarehouses());
   wid -= 1; // 0-idx
-  if (NumWarehouses() <= sysconf::worker_threads)
+  if (NumWarehouses() <= config::worker_threads)
     // more workers than partitions, so its easy
     return wid;
-  const unsigned nwhse_per_partition = NumWarehouses() / sysconf::worker_threads;
+  const unsigned nwhse_per_partition = NumWarehouses() / config::worker_threads;
   const unsigned partid = wid / nwhse_per_partition;
-  if (partid >= sysconf::worker_threads)
-    return sysconf::worker_threads - 1;
+  if (partid >= config::worker_threads)
+    return config::worker_threads - 1;
   return partid;
 }
 
@@ -1980,9 +1980,9 @@ tpcc_worker::txn_order_status()
   //   max_write_set_size : 0
   //   num_txn_contexts : 4
   const uint64_t read_only_mask =
-    sysconf::enable_safesnap ? transaction::TXN_FLAG_READ_ONLY : 0;
+    config::enable_safesnap ? transaction::TXN_FLAG_READ_ONLY : 0;
   const abstract_db::TxnProfileHint hint =
-    sysconf::enable_safesnap ?
+    config::enable_safesnap ?
       abstract_db::HINT_TPCC_ORDER_STATUS_READ_ONLY :
       abstract_db::HINT_TPCC_ORDER_STATUS;
   void *txn = db->new_txn(txn_flags | read_only_mask, arena, txn_buf(), hint);
@@ -2126,9 +2126,9 @@ tpcc_worker::txn_stock_level()
   //   n_read_set_large_instances : 2
   //   num_txn_contexts : 3
   const uint64_t read_only_mask =
-    sysconf::enable_safesnap ? transaction::TXN_FLAG_READ_ONLY : 0;
+    config::enable_safesnap ? transaction::TXN_FLAG_READ_ONLY : 0;
   const abstract_db::TxnProfileHint hint =
-    sysconf::enable_safesnap ?
+    config::enable_safesnap ?
       abstract_db::HINT_TPCC_STOCK_LEVEL_READ_ONLY :
       abstract_db::HINT_TPCC_STOCK_LEVEL;
   void *txn = db->new_txn(txn_flags | read_only_mask, arena, txn_buf(), hint);
@@ -2408,14 +2408,14 @@ private:
     const string s_name(name);
     vector<abstract_ordered_index *> ret(NumWarehouses());
     if (g_enable_separate_tree_per_partition && !is_read_only) {
-      if (NumWarehouses() <= sysconf::worker_threads) {
+      if (NumWarehouses() <= config::worker_threads) {
         for (size_t i = 0; i < NumWarehouses(); i++)
           ret[i] = db->open_index(s_name + "_" + to_string(i), expected_size, is_append_only);
       } else {
-        const unsigned nwhse_per_partition = NumWarehouses() / sysconf::worker_threads;
-        for (size_t partid = 0; partid < sysconf::worker_threads; partid++) {
+        const unsigned nwhse_per_partition = NumWarehouses() / config::worker_threads;
+        for (size_t partid = 0; partid < config::worker_threads; partid++) {
           const unsigned wstart = partid * nwhse_per_partition;
-          const unsigned wend   = (partid + 1 == sysconf::worker_threads) ?
+          const unsigned wend   = (partid + 1 == config::worker_threads) ?
             NumWarehouses() : (partid + 1) * nwhse_per_partition;
           abstract_ordered_index *idx =
             db->open_index(s_name + "_" + to_string(partid), expected_size, is_append_only);
@@ -2454,11 +2454,11 @@ public:
 
     if (g_enable_partition_locks) {
       static_assert(sizeof(aligned_padded_elem<spinlock>) == CACHELINE_SIZE, "xx");
-      void * const px = memalign(CACHELINE_SIZE, sizeof(aligned_padded_elem<spinlock>) * sysconf::worker_threads);
+      void * const px = memalign(CACHELINE_SIZE, sizeof(aligned_padded_elem<spinlock>) * config::worker_threads);
       ALWAYS_ASSERT(px);
       ALWAYS_ASSERT(reinterpret_cast<uintptr_t>(px) % CACHELINE_SIZE == 0);
       g_partition_locks = reinterpret_cast<aligned_padded_elem<spinlock> *>(px);
-      for (size_t i = 0; i < sysconf::worker_threads; i++) {
+      for (size_t i = 0; i < config::worker_threads; i++) {
         new (&g_partition_locks[i]) aligned_padded_elem<spinlock>();
         ALWAYS_ASSERT(!g_partition_locks[i].elem.is_locked());
       }
@@ -2516,15 +2516,15 @@ protected:
   {
     fast_random r(23984543);
     vector<bench_worker *> ret;
-    if (NumWarehouses() <= sysconf::worker_threads) {
-      for (size_t i = 0; i < sysconf::worker_threads; i++)
+    if (NumWarehouses() <= config::worker_threads) {
+      for (size_t i = 0; i < config::worker_threads; i++)
         ret.push_back(new tpcc_worker(i, r.next(), db,
                                       open_tables, partitions,
                                       &barrier_a, &barrier_b,
                                       (i % NumWarehouses()) + 1));
     }
     else {
-      for (size_t i = 0; i < sysconf::worker_threads; i++) {
+      for (size_t i = 0; i < config::worker_threads; i++) {
         ret.push_back(
           new tpcc_worker(
             i,

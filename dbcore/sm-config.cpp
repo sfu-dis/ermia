@@ -6,26 +6,26 @@
 #include "sm-thread.h"
 #include <iostream>
 
-uint32_t sysconf::worker_threads = 0;
-int sysconf::numa_nodes = 0;
-int sysconf::enable_gc = 0;
-std::string sysconf::tmpfs_dir("/tmpfs");
-int sysconf::enable_safesnap = 0;
-int sysconf::enable_ssi_read_only_opt = 0;
-uint64_t sysconf::ssn_read_opt_threshold = sysconf::SSN_READ_OPT_DISABLED;
-int sysconf::log_buffer_mb = 512;
-int sysconf::log_segment_mb = 8192;
-std::string sysconf::log_dir("");
-int sysconf::null_log_device = 0;
-int sysconf::htt_is_on= 1;
-uint64_t sysconf::node_memory_gb = 12;
-int sysconf::recovery_warm_up_policy = sysconf::WARM_UP_NONE;
-sm_log_recover_impl *sysconf::recover_functor = nullptr;
-uint32_t sysconf::max_threads_per_node = 0;
-bool sysconf::loading = true;
+uint32_t config::worker_threads = 0;
+int config::numa_nodes = 0;
+int config::enable_gc = 0;
+std::string config::tmpfs_dir("/tmpfs");
+int config::enable_safesnap = 0;
+int config::enable_ssi_read_only_opt = 0;
+uint64_t config::ssn_read_opt_threshold = config::SSN_READ_OPT_DISABLED;
+int config::log_buffer_mb = 512;
+int config::log_segment_mb = 8192;
+std::string config::log_dir("");
+int config::null_log_device = 0;
+int config::htt_is_on= 1;
+uint64_t config::node_memory_gb = 12;
+int config::recovery_warm_up_policy = config::WARM_UP_NONE;
+sm_log_recover_impl *config::recover_functor = nullptr;
+uint32_t config::max_threads_per_node = 0;
+bool config::loading = true;
 
 void
-sysconf::init() {
+config::init() {
     ALWAYS_ASSERT(worker_threads);
     // We pin threads compactly, ie., socket by socket
     // Figure out how many socket we will occupy here; this determines how
@@ -39,7 +39,7 @@ sysconf::init() {
     thread::init();
 }
 
-void sysconf::sanity_check() {
+void config::sanity_check() {
     ALWAYS_ASSERT(recover_functor);
     ALWAYS_ASSERT(numa_nodes);
 }

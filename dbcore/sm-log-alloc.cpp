@@ -47,8 +47,8 @@ sm_log_alloc_mgr::get_tls_lsn_offset()
    forward processing before recovery completes. 
  */
 sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
-    : _lm(sysconf::null_log_device ? NULL : rf, rfn_arg)
-    , _logbuf(sysconf::log_buffer_mb * 1024 * 1024, get_starting_byte_offset(&_lm))
+    : _lm(config::null_log_device ? NULL : rf, rfn_arg)
+    , _logbuf(config::log_buffer_mb * 1024 * 1024, get_starting_byte_offset(&_lm))
     , _durable_flushed_lsn_offset(_lm.get_durable_mark().offset())
     , _write_daemon_state(0)
     , _waiting_for_durable(false)
@@ -57,8 +57,8 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
     , _write_daemon_should_stop(false)
     , _lsn_offset(_lm.get_durable_mark().offset())
 {
-    _tls_lsn_offset = (uint64_t *)malloc(sizeof(uint64_t) * sysconf::MAX_THREADS);
-    memset(_tls_lsn_offset, 0, sizeof(uint64_t) * sysconf::MAX_THREADS);
+    _tls_lsn_offset = (uint64_t *)malloc(sizeof(uint64_t) * config::MAX_THREADS);
+    memset(_tls_lsn_offset, 0, sizeof(uint64_t) * config::MAX_THREADS);
 
     // fire up the log writing daemon
     _write_daemon_mutex.lock();
@@ -216,7 +216,7 @@ sm_log_alloc_mgr::flush_log_buffer(window_buffer &logbuf, uint64_t new_dlsn_offs
         auto *buf = logbuf.read_buf(durable_byte, nbytes);
         auto file_offset = durable_sid->offset(_durable_flushed_lsn_offset);
         bool flushed = false;
-        if (not flushed and (not sysconf::null_log_device or sysconf::loading)) {
+        if (not flushed and (not config::null_log_device or config::loading)) {
             uint64_t n = os_pwrite(active_fd, buf, nbytes, file_offset);
             THROW_IF(n < nbytes, log_file_error, "Incomplete log write");
         }
