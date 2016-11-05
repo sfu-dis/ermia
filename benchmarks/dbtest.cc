@@ -17,8 +17,6 @@
 #include "../dbcore/sm-thread.h"
 #include "bench.h"
 #include "ndb_wrapper.h"
-//#include "kvdb_wrapper.h"
-//#include "kvdb_wrapper_impl.h"
 
 #if defined(SSI) && defined(SSN)
 #error "SSI + SSN?"
@@ -75,6 +73,7 @@ main(int argc, char **argv)
       {"node-memory-gb"             , required_argument , 0                          , 'p'},
       {"enable-gc"                  , no_argument       , &config::enable_gc        , 1},
       {"tmpfs-dir"                  , required_argument , 0                          , 'm'},
+      {"phantom-prot"               , no_argument       , &config::phantom_prot     , 1},
 #if defined(SSI) || defined(SSN)
       {"safesnap"                   , no_argument       , &config::enable_safesnap  , 1},
 #ifdef SSI
@@ -218,9 +217,6 @@ main(int argc, char **argv)
 
 #ifndef NDEBUG
   cerr << "WARNING: invariant checking is enabled - should disable for benchmark" << endl;
-#ifdef PARANOID_CHECKING
-  cerr << "  *** Paranoid checking is enabled ***" << endl;
-#endif
 #endif
 
   if (verbose) {
@@ -236,11 +232,6 @@ main(int argc, char **argv)
 #endif
 #else
     printf("System: SI\n");
-#endif
-#ifdef PHANTOM_PROT
-    printf("Phantom protection: on\n");
-#else
-    printf("Phantom protection: off\n");
 #endif
     cerr << "Database Benchmark:"                           << endl;
     cerr << "  pid: " << getpid()                           << endl;
@@ -264,6 +255,7 @@ main(int argc, char **argv)
 #else
     cerr << "  var-encode  : no"                            << endl;
 #endif
+    cerr << "  phantom-prot: " << config::phantom_prot     << endl;
     cerr << "  tmpfs-dir   : " << config::tmpfs_dir        << endl;
     cerr << "  log-dir     : " << config::log_dir          << endl;
     cerr << "  log-segment-mb: " << config::log_segment_mb   << endl;
@@ -317,7 +309,7 @@ main(int argc, char **argv)
   for (size_t i = 1; i <= bench_toks.size(); i++)
     new_argv[i] = (char *) bench_toks[i - 1].c_str();
 
-  // Must have everything in CONF ready by this point (ndb-wrapper's ctor will use them)
+  // Must have everything in config ready by this point (ndb-wrapper's ctor will use them)
   config::sanity_check();
   db = new ndb_wrapper();
   test_fn(db, argc, new_argv);

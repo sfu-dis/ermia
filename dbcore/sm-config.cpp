@@ -21,6 +21,8 @@ int config::htt_is_on= 1;
 uint64_t config::node_memory_gb = 12;
 int config::recovery_warm_up_policy = config::WARM_UP_NONE;
 sm_log_recover_impl *config::recover_functor = nullptr;
+int config::phantom_prot = 0;
+
 uint32_t config::max_threads_per_node = 0;
 bool config::loading = true;
 
