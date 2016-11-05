@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 
-#include "amd64.h"
 #include "macros.h"
 #include "util.h"
 
@@ -21,7 +20,7 @@ public:
     // XXX: implement SPINLOCK_BACKOFF
     uint32_t v = value;
     while (v || !__sync_bool_compare_and_swap(&value, 0, 1)) {
-      nop_pause();
+      NOP_PAUSE;
       v = value;
     }
     COMPILER_MEMORY_FENCE;

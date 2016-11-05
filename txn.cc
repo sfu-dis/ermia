@@ -1,7 +1,5 @@
 #include "macros.h"
-#include "amd64.h"
 #include "txn.h"
-#include "lockguard.h"
 #include "dbcore/serial.h"
 
 #include <atomic>
@@ -1070,7 +1068,7 @@ transaction::try_insert_new_tuple(
     OID oid = oidmgr->alloc_oid(fid);
     oidmgr->oid_put_new(btr->get_oid_array(), oid, new_head);
     typename concurrent_btree::insert_info_t ins_info;
-    if (unlikely(!btr->insert_if_absent(varkey(key), oid, tuple, xc, &ins_info))) {
+    if (unlikely(!btr->insert_if_absent(*key, oid, tuple, xc, &ins_info))) {
         oidmgr->oid_unlink(btr->get_oid_array(), oid, tuple);
         return false;
     }

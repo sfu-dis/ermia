@@ -1,11 +1,7 @@
 -include config.mk
 
 ### Options ###
-#CXX=icc
-#CXX=clang
-#CXX=/home/ipandis/apps/bin/gcc483/g++
 CXX=g++
-#CXX=g++491
 
 DEBUG ?= 0
 NDEBUG ?= 0
@@ -82,7 +78,6 @@ endif
 
 SRCFILES = base_txn_btree.cc \
 	object.cc \
-	thread.cc \
 	tuple.cc \
 	txn.cc \
 	varint.cc

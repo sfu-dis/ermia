@@ -1,8 +1,7 @@
 #pragma once
 
-#include "btree_choice.h"
+#include "masstree_btree.h"
 #include "txn.h"
-#include "lockguard.h"
 #include "util.h"
 #include "ndb_type_traits.h"
 

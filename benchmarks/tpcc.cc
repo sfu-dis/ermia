@@ -19,7 +19,6 @@
 #include "../txn.h"
 #include "../macros.h"
 #include "../small_unordered_map.h"
-#include "../spinlock.h"
 
 #include "bench.h"
 #include "tpcc.h"
@@ -130,82 +129,8 @@ NumCustomersPerDistrict()
   return 3000;
 }
 
-// T must implement lock()/unlock(). Both must *not* throw exceptions
-template <typename T>
-class scoped_multilock {
-public:
-  inline scoped_multilock()
-    : did_lock(false)
-  {
-  }
-
-  inline ~scoped_multilock()
-  {
-    if (did_lock)
-      for (auto &t : locks)
-        t->unlock();
-  }
-
-  inline void
-  enq(T &t)
-  {
-    ALWAYS_ASSERT(!did_lock);
-    locks.emplace_back(&t);
-  }
-
-  inline void
-  multilock()
-  {
-    ALWAYS_ASSERT(!did_lock);
-    if (locks.size() > 1)
-      sort(locks.begin(), locks.end());
-#ifndef NDEBUG
-    if (set<T *>(locks.begin(), locks.end()).size() != locks.size()) {
-      for (auto &t : locks)
-        cerr << "lock: " << hexify(t) << endl;
-      ASSERT(false && "duplicate locks found");
-    }
-#endif
-    for (auto &t : locks)
-      t->lock();
-    did_lock = true;
-  }
-
-private:
-  bool did_lock;
-  typename util::vec<T *, 64>::type locks;
-};
-
-// like a lock_guard, but has the option of not acquiring
-template <typename T>
-class scoped_lock_guard {
-public:
-  inline scoped_lock_guard(T &l)
-    : l(&l)
-  {
-    this->l->lock();
-  }
-
-  inline scoped_lock_guard(T *l)
-    : l(l)
-  {
-    if (this->l)
-      this->l->lock();
-  }
-
-  inline ~scoped_lock_guard()
-  {
-    if (l)
-      l->unlock();
-  }
-
-private:
-  T *l;
-};
-
 // configuration flags
 static int g_disable_xpartition_txn = 0;
-static int g_enable_partition_locks = 0;
 static int g_enable_separate_tree_per_partition = 0;
 static int g_new_order_remote_item_pct = 1;
 static int g_new_order_fast_id_gen = 0;
@@ -234,7 +159,6 @@ static double g_wh_spread = 0;
 // 7: Microbenchmark-random - same as Microbenchmark, but uses random read-set range
 static unsigned g_txn_workload_mix[] = { 45, 43, 0, 4, 4, 4, 0, 0 }; // default TPC-C workload mix
 
-static aligned_padded_elem<spinlock> *g_partition_locks = nullptr;
 static aligned_padded_elem<atomic<uint64_t>> *g_district_ids = nullptr;
 
 // maps a wid => partition id
@@ -251,13 +175,6 @@ PartitionId(unsigned int wid)
   if (partid >= config::worker_threads)
     return config::worker_threads - 1;
   return partid;
-}
-
-static inline ALWAYS_INLINE spinlock &
-LockForPartition(unsigned int wid)
-{
-  ASSERT(g_enable_partition_locks);
-  return g_partition_locks[PartitionId(wid)].elem;
 }
 
 static inline atomic<uint64_t> &
@@ -1401,23 +1318,6 @@ tpcc_worker::txn_new_order()
   //   num_txn_contexts : 9
   void *txn = db->new_txn(txn_flags, arena, txn_buf(), abstract_db::HINT_TPCC_NEW_ORDER);
   scoped_str_arena s_arena(arena);
-  scoped_multilock<spinlock> mlock;
-  if (g_enable_partition_locks) {
-    if (allLocal) {
-      mlock.enq(LockForPartition(warehouse_id));
-    } else {
-      small_unordered_map<unsigned int, bool, 64> lockset;
-      mlock.enq(LockForPartition(warehouse_id));
-      lockset[PartitionId(warehouse_id)] = 1;
-      for (uint i = 0; i < numItems; i++) {
-        if (lockset.find(PartitionId(supplierWarehouseIDs[i])) == lockset.end()) {
-          mlock.enq(LockForPartition(supplierWarehouseIDs[i]));
-          lockset[PartitionId(supplierWarehouseIDs[i])] = 1;
-        }
-      }
-    }
-    mlock.multilock();
-  }
     const customer::key k_c(warehouse_id, districtID, customerID);
     customer::value v_c_temp;
     varstr sv_c_temp = str(Size(v_c_temp));
@@ -1569,8 +1469,6 @@ tpcc_worker::txn_delivery()
   //   num_txn_contexts : 4
   void *txn = db->new_txn(txn_flags, arena, txn_buf(), abstract_db::HINT_TPCC_DELIVERY);
   scoped_str_arena s_arena(arena);
-  scoped_lock_guard<spinlock> slock(
-      g_enable_partition_locks ? &LockForPartition(warehouse_id) : nullptr);
     for (uint d = 1; d <= NumDistrictsPerWarehouse(); d++) {
       const new_order::key k_no_0(warehouse_id, d, last_no_o_ids[d - 1]);
       const new_order::key k_no_1(warehouse_id, d, numeric_limits<int32_t>::max());
@@ -1718,13 +1616,6 @@ tpcc_worker::txn_credit_check()
 
 	void *txn = db->new_txn(txn_flags, arena, txn_buf(), abstract_db::HINT_TPCC_CREDIT_CHECK);
 	scoped_str_arena s_arena(arena);
-	scoped_multilock<spinlock> mlock;
-	if (g_enable_partition_locks) {
-		mlock.enq(LockForPartition(warehouse_id));
-		if (PartitionId(customerWarehouseID) != PartitionId(warehouse_id))
-			mlock.enq(LockForPartition(customerWarehouseID));
-		mlock.multilock();
-	}
 
 		// select * from customer with random C_ID
 		customer::key k_c;
@@ -1824,13 +1715,6 @@ tpcc_worker::txn_payment()
   //   num_txn_contexts : 5
   void *txn = db->new_txn(txn_flags, arena, txn_buf(), abstract_db::HINT_TPCC_PAYMENT);
   scoped_str_arena s_arena(arena);
-  scoped_multilock<spinlock> mlock;
-  if (g_enable_partition_locks) {
-    mlock.enq(LockForPartition(warehouse_id));
-    if (PartitionId(customerWarehouseID) != PartitionId(warehouse_id))
-      mlock.enq(LockForPartition(customerWarehouseID));
-    mlock.multilock();
-  }
 
     const warehouse::key k_w(warehouse_id);
     warehouse::value v_w_temp;
@@ -2331,8 +2215,6 @@ tpcc_worker::txn_microbench_random()
 	for (uint i = 0; i < g_microbench_rows; i++) {
 		const stock::key k_s(w, s);
 		ASSERT(cout << "rd " << w << " " << s << endl);
-		scoped_lock_guard<spinlock> slock(
-				g_enable_partition_locks ? &LockForPartition(w) : nullptr);
 		try_catch(tbl_stock(w)->get(txn, Encode(str(Size(k_s)), k_s), sv));
 
 		if (++s > NumItems()) {
@@ -2452,18 +2334,6 @@ public:
         open_tables[t.first + "_" + to_string(i)] = v[i];
     }
 
-    if (g_enable_partition_locks) {
-      static_assert(sizeof(aligned_padded_elem<spinlock>) == CACHELINE_SIZE, "xx");
-      void * const px = memalign(CACHELINE_SIZE, sizeof(aligned_padded_elem<spinlock>) * config::worker_threads);
-      ALWAYS_ASSERT(px);
-      ALWAYS_ASSERT(reinterpret_cast<uintptr_t>(px) % CACHELINE_SIZE == 0);
-      g_partition_locks = reinterpret_cast<aligned_padded_elem<spinlock> *>(px);
-      for (size_t i = 0; i < config::worker_threads; i++) {
-        new (&g_partition_locks[i]) aligned_padded_elem<spinlock>();
-        ALWAYS_ASSERT(!g_partition_locks[i].elem.is_locked());
-      }
-    }
-
     if (g_new_order_fast_id_gen) {
       void * const px =
         memalign(
@@ -2549,7 +2419,6 @@ tpcc_do_test(abstract_db *db, int argc, char **argv)
     static struct option long_options[] =
     {
       {"disable-cross-partition-transactions" , no_argument       , &g_disable_xpartition_txn             , 1}   ,
-      {"enable-partition-locks"               , no_argument       , &g_enable_partition_locks             , 1}   ,
       {"enable-separate-tree-per-partition"   , no_argument       , &g_enable_separate_tree_per_partition , 1}   ,
       {"new-order-remote-item-pct"            , required_argument , 0                                     , 'r'} ,
       {"new-order-fast-id-gen"                , no_argument       , &g_new_order_fast_id_gen              , 1}   ,
@@ -2659,7 +2528,6 @@ tpcc_do_test(abstract_db *db, int argc, char **argv)
     else
       cerr << "  random home warehouse (%)    : " << g_wh_spread * 100 << endl;
     cerr << "  cross_partition_transactions : " << !g_disable_xpartition_txn << endl;
-    cerr << "  partition_locks              : " << g_enable_partition_locks << endl;
     cerr << "  separate_tree_per_partition  : " << g_enable_separate_tree_per_partition << endl;
     cerr << "  new_order_remote_item_pct    : " << g_new_order_remote_item_pct << endl;
     cerr << "  new_order_fast_id_gen        : " << g_new_order_fast_id_gen << endl;

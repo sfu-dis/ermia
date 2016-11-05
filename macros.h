@@ -88,3 +88,5 @@
 #define NDB_MEMCPY memcpy
 #define NDB_MEMSET memset
 #endif
+
+#define NOP_PAUSE asm volatile("pause" : :)

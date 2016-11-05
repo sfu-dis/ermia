@@ -20,7 +20,6 @@ inline uint32_t my_id() {
   if (!thread_initialized) {
     thread_id = __sync_fetch_and_add(&next_thread_id, 1);
     thread_initialized = true;
-    std::cout << "New thread " << thread_id << std::endl;
   }
   return thread_id;
 }

@@ -16,13 +16,9 @@
 
 #include "log2.hh"
 #include "ndb_type_traits.h"
-#include "varkey.h"
 #include "macros.h"
 #include "prefetch.h"
-#include "amd64.h"
 #include "util.h"
-#include "small_vector.h"
-#include "ownership_checker.h"
 
 #include "masstree/masstree_scan.hh"
 #include "masstree/masstree_insert.hh"
@@ -164,7 +160,7 @@ class mbtree {
   typedef Masstree::leaf<P> node_type;
   typedef typename node_base_type::nodeversion_type nodeversion_type;
 
-  typedef varkey key_type;
+  typedef varstr key_type;
   typedef lcdf::Str string_type;
   typedef uint64_t key_slice;
   typedef typename P::value_type value_type;
@@ -574,7 +570,7 @@ inline bool mbtree<P>::search(const key_type &k, OID &o, dbtuple* &v, xid_contex
                               versioned_node_t *search_info) const
 {
   threadinfo ti(xc->begin_epoch);
-  Masstree::unlocked_tcursor<P> lp(table_, k.data(), k.length());
+  Masstree::unlocked_tcursor<P> lp(table_, k.data(), k.size());
   bool found = lp.find_unlocked(ti);
   if (found)
   {
@@ -594,7 +590,7 @@ inline bool mbtree<P>::insert(const key_type &k, dbtuple * v, xid_context *xc,
                               insert_info_t *insert_info)
 {
   threadinfo ti(xc->begin_epoch);
-  Masstree::tcursor<P> lp(table_, k.data(), k.length());
+  Masstree::tcursor<P> lp(table_, k.data(), k.size());
   bool found = lp.find_insert(ti);
   if (!found)
     ti.advance_timestamp(lp.node_timestamp());
@@ -621,7 +617,7 @@ inline bool mbtree<P>::insert_if_absent(const key_type &k, OID o, dbtuple * v,
     e = xc->begin_epoch;
   }
   threadinfo ti(e);
-  Masstree::tcursor<P> lp(table_, k.data(), k.length());
+  Masstree::tcursor<P> lp(table_, k.data(), k.size());
   bool found = lp.find_insert(ti);
   if (!found) {
 insert_new:
@@ -657,7 +653,7 @@ template <typename P>
 inline bool mbtree<P>::remove(const key_type &k, xid_context* xc, dbtuple * *old_v)
 {
   threadinfo ti(xc->begin_epoch);
-  Masstree::tcursor<P> lp(table_, k.data(), k.length());
+  Masstree::tcursor<P> lp(table_, k.data(), k.size());
   bool found = lp.find_locked(ti);
   if (found && old_v)
 	  *old_v = oidmgr->oid_get_latest_version(table_.get_oid_array(), lp.value());
@@ -675,10 +671,10 @@ class mbtree<P>::search_range_scanner_base {
   }
   void check(const Masstree::scanstackelt<P>& iter,
              const Masstree::key<uint64_t>& key) {
-    int min = std::min(boundary_->length(), key.prefix_length());
+    int min = std::min((int)boundary_->size(), key.prefix_length());
     int cmp = memcmp(boundary_->data(), key.full_string().data(), min);
     if (!Reverse) {
-      if (cmp < 0 || (cmp == 0 && boundary_->length() <= key.prefix_length()))
+      if (cmp < 0 || (cmp == 0 && (int)boundary_->size() <= key.prefix_length()))
         boundary_compar_ = true;
       else if (cmp == 0) {
         uint64_t last_ikey = iter.node()->ikey0_[iter.permutation()[iter.permutation().size() - 1]];
@@ -754,7 +750,7 @@ inline void mbtree<P>::search_range_call(const key_type &lower,
                                          xid_context *xc) const {
   low_level_search_range_scanner<false> scanner(this, upper, callback);
   threadinfo ti(xc->begin_epoch);
-  table_.scan(lcdf::Str(lower.data(), lower.length()), true, scanner, xc, ti);
+  table_.scan(lcdf::Str(lower.data(), lower.size()), true, scanner, xc, ti);
 }
 
 template <typename P>
@@ -764,7 +760,7 @@ inline void mbtree<P>::rsearch_range_call(const key_type &upper,
                                           xid_context *xc) const {
   low_level_search_range_scanner<true> scanner(this, lower, callback);
   threadinfo ti(xc->begin_epoch);
-  table_.rscan(lcdf::Str(upper.data(), upper.length()), true, scanner, xc, ti);
+  table_.rscan(lcdf::Str(upper.data(), upper.size()), true, scanner, xc, ti);
 }
 
 template <typename P> template <typename F>
@@ -775,7 +771,7 @@ inline void mbtree<P>::search_range(const key_type &lower,
   low_level_search_range_callback_wrapper<F> wrapper(callback);
   low_level_search_range_scanner<false> scanner(this, upper, wrapper);
   threadinfo ti(xc->begin_epoch);
-  table_.scan(lcdf::Str(lower.data(), lower.length()), true, scanner, xc, ti);
+  table_.scan(lcdf::Str(lower.data(), lower.size()), true, scanner, xc, ti);
 }
 
 template <typename P> template <typename F>
@@ -786,7 +782,7 @@ inline void mbtree<P>::rsearch_range(const key_type &upper,
   low_level_search_range_callback_wrapper<F> wrapper(callback);
   low_level_search_range_scanner<true> scanner(this, lower, wrapper);
   threadinfo ti(xc->begin_epoch);
-  table_.rscan(lcdf::Str(upper.data(), upper.length()), true, scanner, xc, ti);
+  table_.rscan(lcdf::Str(upper.data(), upper.size()), true, scanner, xc, ti);
 }
 
 template <typename P>

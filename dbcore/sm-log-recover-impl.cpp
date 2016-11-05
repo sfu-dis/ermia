@@ -84,7 +84,7 @@ sm_log_recover_impl::recover_index_insert(sm_log_scan_mgr::record_scan *logrec, 
   ASSERT(align_up(len + sizeof(varstr)) == sz);
 
   // Construct the varkey (skip the varstr struct then it's data)
-  varkey key((uint8_t *)((char *)buf + sizeof(varstr)), len);
+  varstr key((uint8_t *)((char *)buf + sizeof(varstr)), len);
 
   //printf("key %s %s\n", (char *)key.data(), buf);
   ALWAYS_ASSERT(index->btr.underlying_btree.insert_if_absent(key, logrec->oid(), NULL, 0));
