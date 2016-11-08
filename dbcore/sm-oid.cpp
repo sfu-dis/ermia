@@ -617,7 +617,7 @@ sm_oid_mgr::take_chkpt(LSN cstart)
             // 2. Tuple is in memory and in storage (has a valid pdest)
             // 3. Tuple is not in memory but in storage
             //    For both 2 and 3, use the object's _pdest directly
-            if (pdest.asi_type() != fat_ptr::ASI_LOG or LSN::from_ptr(pdest) >= cstart) {
+            if (pdest.asi_type() != fat_ptr::ASI_LOG or LSN::from_ptr(pdest) > cstart) {
                 ptr = volatile_read(obj->_next);
                 goto find_pdest;
             }
