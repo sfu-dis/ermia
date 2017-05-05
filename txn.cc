@@ -581,10 +581,6 @@ transaction::parallel_ssn_commit()
         volatile_write(tuple->xstamp, cstamp);
         volatile_write(tuple->get_object()->_clsn, clsn_ptr);
         ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
-        if (config::enable_gc and tuple->next()) {
-            // construct the (sub)list here so that we have only one CAS per tx
-            enqueue_recycle_oids(w);
-        }
     }
 
     // This state change means:
@@ -915,7 +911,6 @@ transaction::parallel_ssi_commit()
 
     fat_ptr clsn_ptr = LSN::make(cstamp, 0).to_log_ptr();
     // stamp overwritten versions, stuff clsn
-    auto clsn = xc->end;
     for (uint32_t i = 0; i < write_set->size(); ++i) {
         auto &w = (*write_set)[i];
         dbtuple* tuple = w.get_object()->tuple();
@@ -934,10 +929,6 @@ transaction::parallel_ssi_commit()
         volatile_write(tuple->xstamp, cstamp);
         volatile_write(tuple->get_object()->_clsn, clsn_ptr);
         ASSERT(tuple->get_object()->_clsn.asi_type() == fat_ptr::ASI_LOG);
-        if (config::enable_gc and tuple->next()) {
-            // construct the (sub)list here so that we have only one XCHG per tx
-            enqueue_recycle_oids(w);
-        }
     }
 
     // NOTE: make sure this happens after populating log block,
