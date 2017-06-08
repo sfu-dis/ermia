@@ -57,8 +57,7 @@ struct sm_thread {
       // beyond are hyper threads.
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
-      //CPU_SET(core + node * config::max_threads_per_node, &cpuset);
-      CPU_SET(node + 4 * core, &cpuset);
+      CPU_SET(core + node * config::max_threads_per_node, &cpuset);
       int rc = pthread_setaffinity_np(thd.native_handle(),
                                       sizeof(cpu_set_t), &cpuset);
       ALWAYS_ASSERT(rc == 0);
