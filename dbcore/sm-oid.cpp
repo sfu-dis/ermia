@@ -3,16 +3,18 @@
 
 #include <map>
 
-#include "../util.h"
+#include "../benchmarks/ndb_wrapper.h"
 #include "../txn.h"
+#include "../util.h"
 
 #include "burt-hash.h"
 #include "sc-hash.h"
 #include "sm-alloc.h"
 #include "sm-chkpt.h"
 #include "sm-config.h"
-#include "sm-file.h"
+#include "sm-index.h"
 #include "sm-log-recover-impl.h"
+#include "sm-object.h"
 #include "sm-oid-impl.h"
 
 sm_oid_mgr *oidmgr = NULL;
@@ -28,7 +30,7 @@ struct thread_data {
        implementation can achieve 90% or higher occupancy for
        uniformly distributed FIDs.
      */
-    static size_t const NENTRIES = 64;
+    static size_t const NENTRIES = 4096;
     
     struct hasher : burt_hash {
         using burt_hash::burt_hash;
@@ -227,7 +229,7 @@ void
 oid_array::ensure_size(size_t n) {
     _backing_store.ensure_size(OFFSETOF(oid_array, _entries[n]));
 }
-                                        
+
 sm_oid_mgr_impl::sm_oid_mgr_impl()
 {
     /* Bootstrap the OBJARRAY, which contains everything (including
@@ -322,10 +324,13 @@ sm_oid_mgr_impl::create_file(bool needs_alloc)
 void
 sm_oid_mgr_impl::recreate_file(FID f)
 {
-    ASSERT(not file_exists(f));
+    if(file_exists(f)) {
+      LOG(FATAL) << "File already exists. Is this a secondary index?";
+    }
     auto ptr = oid_array::make();
     oid_put(OBJARRAY_FID, f, ptr);
     ASSERT(file_exists(f));
+    DLOG(INFO) << "[Recovery] recreate file " << f;
     // Allocator doesn't exist for now, need to call
     // recreate_allocator(f) later after we figured
     // out the high watermark by scanning the log.
@@ -376,7 +381,7 @@ sm_oid_mgr_impl::recreate_allocator(FID f, OID m)
     if (not m)
         return;
 
-    if (m < alloc->head.capacity_mark and m < alloc->head.hiwater_mark)
+    if (m <= alloc->head.capacity_mark and m <= alloc->head.hiwater_mark)
         return;
 
     // Set capacity_mark = hiwater_mark = m, the cache machinery
@@ -387,7 +392,7 @@ sm_oid_mgr_impl::recreate_allocator(FID f, OID m)
     oid_array *oa = ptr;
     ASSERT(oa);
     oa->ensure_size(alloc->head.capacity_mark);
-    printf("[Recovery] recreate allocator %d, himark=%d\n", f, m);
+    DLOG(INFO) << "[Recovery] recreate allocator " << f << ", himark=" << m;
 }
 
 void
@@ -438,51 +443,6 @@ sm_oid_mgr_impl::destroy_file(FID f)
     thread_free(this, OBJARRAY_FID, f);
 }
 
-fat_ptr*
-sm_oid_mgr_impl::oid_access(FID f, OID o)
-{
-    auto *oa = get_array(f);
-    return oa->get(o);
-}
-
-sm_allocator*
-sm_oid_mgr_impl::get_allocator(FID f)
-{
-    // TODO: allow allocators to be paged out
-    sm_allocator *alloc = oid_get(ALLOCATOR_FID, f);
-    THROW_IF(not alloc, illegal_argument,
-             "No allocator for FID %d", f);
-    return alloc;
-}
-
-oid_array*
-sm_oid_mgr_impl::get_array(FID f)
-{
-    // TODO: allow allocators to be paged out
-    oid_array *oa = *files->get(f);
-    THROW_IF(not oa, illegal_argument,
-             "No such file: %d", f);
-    return oa;
-}
-
-bool
-sm_oid_mgr_impl::file_exists(FID f)
-{
-    oid_array *oa = *files->get(f);
-    return oa != NULL;
-}
-
-void
-sm_oid_mgr_impl::lock_file(FID f)
-{
-    mutexen[f % MUTEX_COUNT].lock();
-}
-void
-sm_oid_mgr_impl::unlock_file(FID f)
-{
-    mutexen[f % MUTEX_COUNT].unlock();
-}
-
 oid_array*
 sm_oid_mgr::get_array(FID f)
 {
@@ -490,150 +450,166 @@ sm_oid_mgr::get_array(FID f)
 }
 
 void
-sm_oid_mgr::create(LSN chkpt_start, sm_log_recover_mgr *lm)
+sm_oid_mgr::create()
 {
-    // Create an empty oidmgr, with initial internal files
-    oidmgr = new sm_oid_mgr_impl{};
-    oidmgr->dfd = dirent_iterator(config::log_dir.c_str()).dup();
-    chkptmgr = new sm_chkpt_mgr(chkpt_start);
-
-    if (not sm_log::need_recovery or chkpt_start.offset() == 0)
-        return;
-
-    // Find the chkpt file and recover from there
-    char buf[CHKPT_DATA_FILE_NAME_BUFSZ];
-    size_t n = os_snprintf(buf, sizeof(buf),
-                           CHKPT_DATA_FILE_NAME_FMT, chkpt_start._val);
-    printf("[Recovery.chkpt] %s\n", buf);
-    ASSERT(n < sizeof(buf));
-    int fd = os_openat(oidmgr->dfd, buf, O_RDONLY);
-
-    while (1) {
-        // Read himark
-        OID himark = 0;
-        n = read(fd, &himark, sizeof(OID));
-        if (not n)  // EOF
-            break;
-
-        ASSERT(n == sizeof(OID));
-
-        // Read the table's name
-        size_t len = 0;
-        n = read(fd, &len, sizeof(size_t));
-        THROW_IF(n != sizeof(size_t), illegal_argument,
-                 "Error reading tabel name length");
-        char name_buf[256];
-        n = read(fd, name_buf, len);
-        std::string name(name_buf, len);
-
-        // FID
-        FID f = 0;
-        n = read(fd, &f, sizeof(FID));
-
-        // Recover fid_map and recreate the empty file
-        ASSERT(sm_file_mgr::get_index(name));
-        sm_file_mgr::name_map[name]->fid = f;
-        sm_file_mgr::fid_map[f] = new sm_file_descriptor(f, name, sm_file_mgr::get_index(name));
-        ASSERT(not oidmgr->file_exists(f));
-        oidmgr->recreate_file(f);
-        printf("[Recovery.chkpt] FID=%d %s\n", f, name.c_str());
-
-        // Recover allocator status
-        oid_array *oa = oidmgr->get_array(f);
-        oa->ensure_size(oa->alloc_size(himark));
-        oidmgr->recreate_allocator(f, himark);
-
-        // Populate the OID array
-        while (1) {
-            OID o = 0;
-            n = read(fd, &o, sizeof(OID));
-            if (o == himark)
-                break;
-
-            fat_ptr ptr = NULL_PTR;
-            n = read(fd, &ptr, sizeof(fat_ptr));
-            if (config::eager_warm_up()) {
-                ptr = object::create_tuple_object(ptr, NULL_PTR, 0, lm);
-                ASSERT(ptr.asi_type() == 0);
-            }
-            else {
-                object *obj = new (MM::allocate(sizeof(object), 0)) object(ptr, NULL_PTR, 0);
-                ptr = fat_ptr::make(obj, INVALID_SIZE_CODE, fat_ptr::ASI_LOG_FLAG);
-                ASSERT(ptr.asi_type() == fat_ptr::ASI_LOG);
-            }
-            oidmgr->oid_put_new(f, o, ptr);
-        }
-    }
+  // Create an empty oidmgr, with initial internal files
+  oidmgr = new sm_oid_mgr_impl{};
+  oidmgr->dfd = dirent_iterator(config::log_dir.c_str()).dup();
 }
 
-void
-sm_oid_mgr::take_chkpt(LSN cstart)
-{
+void sm_oid_mgr::PrimaryTakeChkpt(uint64_t chkpt_start_lsn) {
+    ASSERT(!config::is_backup_srv());
     // Now the real work. The format of a chkpt file is:
-    // [table 1 himark]
-    // [table 1 name length, table 1 name, table 1 FID]
-    // [OID1, ptr for table 1]
-    // [OID2, ptr for table 1]
-    // [table 1 himark]
+    // [number of indexes]
+    // [primary index 1 name length, name, tuple/key FID, himark]
+    // [primary index 2 name length, name, tuple/key FID, himark]
     // ...
-    // [table 2 himark]
-    // [table 2 name length, table 2 name, table 2 FID]
-    // [OID1, ptr for table 2]
-    // [OID2, ptr for table 2]
-    // [table 2 himark]
+    // [2nd index 1 name length, name, FID, himark]
+    // [2nd index 2 name length, name, FID, himark]
     // ...
     //
-    // The table's himark denotes its start and end
+    // [index 1 himark]
+    // [index 1 tuple_fid, key_fid]
+    // [OID1, key and/or data]
+    // [OID2, key and/or data]
+    // [index 1 himark]
+    // ...
+    // same thing for index 2
+    // ...
 
-    for (auto &fm : sm_file_mgr::fid_map) {
-        auto* fd = fm.second;
-        FID fid = fd->fid;
+    // Write the number of indexes 
+    // TODO(tzwang): handle dynamically created tables/indexes
+    uint64_t chkpt_size = 0;
+    uint32_t num_idx = IndexDescriptor::NumIndexes();
+    chkptmgr->write_buffer(&num_idx, sizeof(uint32_t));
+    chkpt_size += sizeof(uint32_t);
+
+    // Write details about each primary index, then secondary index
+    // so that during recovery we have primary indexes first and then
+    // 2nd indexes can refer to the FID of the corresponding primary.
+    bool handling_2nd = false;
+iterate_index:
+    for(auto& fm : IndexDescriptor::name_map) {
+      IndexDescriptor* id = fm.second;
+      if(!((id->IsPrimary() && !handling_2nd) || !id->IsPrimary() && handling_2nd)) {
+        continue;
+      }
+      size_t len = id->GetName().length();
+      FID tuple_fid = id->GetTupleFid();
+      FID key_fid = id->GetKeyFid();
+      auto *alloc = get_impl(this)->get_allocator(tuple_fid);
+      OID himark = alloc->head.hiwater_mark;
+
+      // [Name length, name, tuple/key FID, himark]
+      chkptmgr->write_buffer(&len, sizeof(size_t));
+      chkptmgr->write_buffer((void *)id->GetName().c_str(), len);
+      chkptmgr->write_buffer(&tuple_fid, sizeof(FID));
+      chkptmgr->write_buffer(&key_fid, sizeof(FID));
+      chkptmgr->write_buffer(&himark, sizeof(OID));
+      chkpt_size += (sizeof(size_t) + len + sizeof(FID) + sizeof(OID));
+    }
+    if(!handling_2nd) {
+      handling_2nd = true;
+      goto iterate_index;
+    }
+    LOG(INFO) << "[Checkpoint] header size: " << chkpt_size;
+
+    // Write keys and/or tuples for each index, primary first
+    for(auto& fm : IndexDescriptor::name_map) {
+        IndexDescriptor* id = fm.second;
+        FID tuple_fid = id->GetTupleFid();
         // Find the high watermark of this file and dump its
         // backing store up to the size of the high watermark
-        auto *alloc = get_impl(this)->get_allocator(fid);
+        auto *alloc = get_impl(this)->get_allocator(tuple_fid);
         OID himark = alloc->head.hiwater_mark;
 
-        // Write the himark to denote a table start
+        // Write himark
         chkptmgr->write_buffer(&himark, sizeof(OID));
 
-        // [Name length, name, FID]
-        size_t len = fd->name.length();
-        chkptmgr->write_buffer(&len, sizeof(size_t));
-        chkptmgr->write_buffer((void *)fd->name.c_str(), len);
-        chkptmgr->write_buffer(&fd->fid, sizeof(FID));
+        // Write the tuple FID to note which table these OIDs to follow belongs to
+        chkptmgr->write_buffer(&tuple_fid, sizeof(FID));
 
-        // Now write the [OID, ptr] pairs
+        // Key FID
+        FID key_fid = id->GetKeyFid();
+        chkptmgr->write_buffer(&key_fid, sizeof(FID));
+
+        auto* oa = fm.second->GetTupleArray();
+        auto* ka = fm.second->GetKeyArray();
+        ASSERT(oa);
+        ASSERT(ka);
+
+        // Now write the [OID, payload] pairs. Record both OID and keys for
+        // primary indexes; keys only for 2nd indexes.
+        uint64_t nrecords = 0;
+        bool is_primary = id->IsPrimary();
         for (OID oid = 0; oid < himark; oid++) {
-            auto ptr = oid_get(fid, oid);
-        find_pdest:
-            if (not ptr.offset())
+            // Checkpoints need not be consistent: grab the latest committed
+            // version and leave.
+            fat_ptr ptr = oid_get(oa, oid);
+        retry:
+            if (not ptr.offset()) {
                 continue;
-            object *obj = (object *)ptr.offset();
-            auto pdest = volatile_read(obj->_pdest);
-            // Three cases:
-            // 1. Tuple is in memory, not in storage (or doesn't have a valid
-            //    pdest yet). Skip and continue to look at an older version
-            //    which should be committed or nothing
-            // 2. Tuple is in memory and in storage (has a valid pdest)
-            // 3. Tuple is not in memory but in storage
-            //    For both 2 and 3, use the object's _pdest directly
-            if (pdest.asi_type() != fat_ptr::ASI_LOG or LSN::from_ptr(pdest) > cstart) {
-                ptr = volatile_read(obj->_next);
-                goto find_pdest;
             }
 
-            ASSERT(pdest.offset() and pdest.asi_type() == fat_ptr::ASI_LOG);
-            // Now write this out
-            // XXX (tzwang): perhaps we'll also need obj._next later?
-            chkptmgr->write_buffer(&oid, sizeof(OID));
-            chkptmgr->write_buffer(&pdest, sizeof(fat_ptr));
-        }
-        // Write himark as end of fid
-        chkptmgr->write_buffer(&himark, sizeof(OID));
-        std::cout << "[Checkpoint] FID(" << fd->fid << ") = "
-                  << fid << ", himark = " << himark << std::endl;
-    }
+            Object* obj = (Object*)ptr.offset();
+            fat_ptr next = obj->GetNextVolatile();
+            fat_ptr clsn = obj->GetClsn();
+            if(clsn == NULL_PTR) {
+              // Stepping on a dead tuple, see details in oid_get_version.
+              ptr = oid_get(oa, oid);
+              goto retry;
+            } else if(clsn.asi_type() != fat_ptr::ASI_LOG) {
+              // Someone is still working on this version
+              ptr = next;
+              goto retry;
+            }
 
+            ASSERT(obj->GetClsn().offset());
+            ASSERT(obj->GetClsn().asi_type() == fat_ptr::ASI_LOG);
+
+            fat_ptr pdest = obj->GetPersistentAddress();
+            if(pdest.offset() == 0) {
+              // must be a delete, skip it
+              continue;
+            }
+
+            nrecords++;
+            // Write OID
+            chkptmgr->write_buffer(&oid, sizeof(OID));
+
+            // Key
+            fat_ptr key_ptr = oid_get(ka, oid);
+            varstr* key = (varstr*)key_ptr.offset();
+            ALWAYS_ASSERT(key);
+            ALWAYS_ASSERT(key->l);
+            ALWAYS_ASSERT(key->p);
+            chkptmgr->write_buffer(&key->l, sizeof(uint32_t));
+            chkptmgr->write_buffer(key->data(), key->size());
+
+            // Tuple data if it's the primary index
+            if(fm.second->IsPrimary()) {
+              if(!obj->IsInMemory()) {
+                obj->Pin();
+              }
+              uint8_t size_code = ptr.size_code();
+              ALWAYS_ASSERT(size_code != INVALID_SIZE_CODE);
+              auto data_size = decode_size_aligned(size_code);
+              data_size = decode_size_aligned(size_code);
+              ALWAYS_ASSERT(obj->GetPinnedTuple()->size <= data_size - sizeof(Object) - sizeof(dbtuple));
+              chkptmgr->write_buffer(&size_code, sizeof(uint8_t));
+              // It's already there if we're digging out a tuple from a previous chkpt
+              chkptmgr->write_buffer((char*)obj, data_size);
+              ALWAYS_ASSERT(obj->GetClsn().asi_type() == fat_ptr::ASI_LOG);
+              ALWAYS_ASSERT(obj->GetPinnedTuple()->size <= data_size - sizeof(Object) - sizeof(dbtuple));
+              chkpt_size += (sizeof(OID) + sizeof(uint8_t) + data_size);
+            }
+        }
+        // Write himark to denote end
+        chkptmgr->write_buffer(&himark, sizeof(OID));
+        LOG(INFO) << "[Checkpoint] "<< id->GetName() << " (" << tuple_fid << ", "
+          << key_fid << ") himark=" << himark << ", wrote " << chkpt_size
+          << " bytes, " << nrecords << " records";
+    }
     chkptmgr->sync_buffer();
 }
 
@@ -653,20 +629,24 @@ sm_oid_mgr::start_warm_up()
 void
 sm_oid_mgr::warm_up()
 {
+  // REVISIT
+  /*
     ASSERT(oidmgr);
     std::cout << "[Warm-up] Started\n";
     {
         util::scoped_timer t("data warm-up");
         // Go over each OID entry and ensure_tuple there
-        for (auto &fm : sm_file_mgr::fid_map) {
-            auto* fd = fm.second;
-            auto *alloc = oidmgr->get_allocator(fd->fid);
+        for (auto &fm : IndexDescriptor::fid_map) {
+            auto* id = fm.second;
+            auto *alloc = oidmgr->get_allocator(id->GetTupleFid());
             OID himark = alloc->head.hiwater_mark;
-            oid_array *oa = oidmgr->get_array(fd->fid);
+            FID fid = fm.first;
+            oid_array *oa = oidmgr->get_array(fid);
             for (OID oid = 0; oid < himark; oid++)
                 oidmgr->ensure_tuple(oa, oid, 0);
         }
     }
+    */
 }
 
 FID
@@ -736,87 +716,62 @@ sm_oid_mgr::oid_get(FID f, OID o)
     return *get_impl(this)->oid_access(f, o);
 }
 
-fat_ptr
-sm_oid_mgr::oid_get(oid_array *oa, OID o)
-{
-    return *oa->get(o);
-}
-
 fat_ptr*
 sm_oid_mgr::oid_get_ptr(FID f, OID o)
 {
     return get_impl(this)->oid_access(f, o);
 }
 
-fat_ptr*
-sm_oid_mgr::oid_get_ptr(oid_array *oa, OID o)
-{
-    return oa->get(o);
-}
-
 void
 sm_oid_mgr::oid_put(FID f, OID o, fat_ptr p)
 {
-    auto *ptr = get_impl(this)->oid_access(f, o);
-    *ptr = p;
-}
-
-void
-sm_oid_mgr::oid_put(oid_array *oa, OID o, fat_ptr p)
-{
-    auto *ptr = oa->get(o);
-    *ptr = p;
+    *get_impl(this)->oid_access(f, o) = p;
 }
 
 void
 sm_oid_mgr::oid_put_new(FID f, OID o, fat_ptr p)
 {
-    auto *ptr = get_impl(this)->oid_access(f, o);
-    ASSERT(*ptr == NULL_PTR);
-    *ptr = p;
+    auto *entry = get_impl(this)->oid_access(f, o);
+    ALWAYS_ASSERT(*entry == NULL_PTR);
+    *entry = p;
 }
 
 void
-sm_oid_mgr::oid_put_new(oid_array *oa, OID o, fat_ptr p)
+sm_oid_mgr::oid_put_new_if_absent(FID f, OID o, fat_ptr p)
 {
+  auto *entry = get_impl(this)->oid_access(f, o);
+  if(*entry == NULL_PTR) {
+    *entry = p;
+  }
+}
+
+fat_ptr sm_oid_mgr::PrimaryTupleUpdate(FID f,
+                                       OID o,
+                                       const varstr *value,
+                                       xid_context *updater_xc,
+                                       fat_ptr *new_obj_ptr) {
+  return PrimaryTupleUpdate(get_impl(this)->get_array(f), o, value, updater_xc, new_obj_ptr);
+}
+
+// For primary server only - guaranteed to have no gaps between versions,
+// i.e., pdest_next_ matches volatile_next_.
+fat_ptr sm_oid_mgr::PrimaryTupleUpdate(oid_array *oa,
+                                       OID o,
+                                       const varstr *value,
+                                       xid_context *updater_xc,
+                                       fat_ptr *new_obj_ptr) {
+    ASSERT(!config::is_backup_srv());
     auto *ptr = oa->get(o);
-    ASSERT(*ptr == NULL_PTR);
-    *ptr = p;
-}
-
-fat_ptr
-sm_oid_mgr::oid_put_update(FID f,
-                           OID o,
-                           const varstr *value,
-                           xid_context *updater_xc,
-                           fat_ptr *new_obj_ptr)
-{
-    return oid_put_update(get_impl(this)->get_array(f), o, value, updater_xc, new_obj_ptr);
-}
-
-fat_ptr
-sm_oid_mgr::oid_put_update(oid_array *oa,
-                           OID o,
-                           const varstr *value,
-                           xid_context *updater_xc,
-                           fat_ptr *new_obj_ptr)
-{
-#ifndef NDEBUG
-    int attempts = 0;
-#endif
-    auto *ptr = ensure_tuple(oa, o, updater_xc->begin_epoch);
-    // No need to call ensure_tuple() below start_over - it returns a ptr,
-    // a dereference is enough to capture the content.
-    // Note: this is different from oid_get_version where start_over must
-    // appear *above* ensure_tuple: here we don't change the value of ptr.
 start_over:
     fat_ptr head = volatile_read(*ptr);
-    object *old_desc = (object *)head.offset();
+    ASSERT(head.asi_type() == 0);
+    Object* old_desc = (Object*)head.offset();
+    ASSERT(old_desc);
     ASSERT(head.size_code() != INVALID_SIZE_CODE);
-    dbtuple *version = (dbtuple *)old_desc->payload();
+    dbtuple* version = (dbtuple *)old_desc->GetPayload();
     bool overwrite = false;
 
-    auto clsn = volatile_read(old_desc->_clsn);
+    auto clsn = old_desc->GetClsn();
     if (clsn == NULL_PTR) {
         // stepping on an unlinked version?
         goto start_over;
@@ -842,7 +797,7 @@ start_over:
         xid_context *holder= xid_get_context(holder_xid);
         if (not holder) {
 #ifndef NDEBUG
-            auto t = volatile_read(old_desc->_clsn).asi_type();
+            auto t = old_desc->GetClsn().asi_type();
             ASSERT(t == fat_ptr::ASI_LOG or oid_get(oa, o) != head);
 #endif
             goto start_over;
@@ -854,10 +809,6 @@ start_over:
 
         // context still valid for this XID?
         if (unlikely(owner != holder_xid)) {
-#ifndef NDEBUG
-            ASSERT(attempts < 2);
-            attempts++;
-#endif
             goto start_over;
         }
         ASSERT(holder_xid != updater_xid);
@@ -874,7 +825,7 @@ start_over:
     }
     // check dirty writes
     else {
-        ASSERT(clsn.asi_type() == fat_ptr::ASI_LOG );
+        ASSERT(clsn.asi_type() == fat_ptr::ASI_LOG);
 #ifndef RC
         // First updater wins: if some concurrent tx committed first,
         // I have to abort. Same as in Oracle. Otherwise it's an isolation
@@ -891,22 +842,26 @@ install:
     // Note for this to be correct we shouldn't allow multiple txs
     // working on the same tuple at the same time.
 
-    *new_obj_ptr = object::create_tuple_object(value, false, updater_xc->begin_epoch);
-    object* new_object = (object *)new_obj_ptr->offset();
-    ASSERT(not new_object->tuple()->is_defunct());
-    new_object->_clsn = updater_xc->owner.to_ptr();
-
+    *new_obj_ptr = Object::Create(value, false, updater_xc->begin_epoch);
+    ASSERT(new_obj_ptr->asi_type() == 0);
+    Object *new_object = (Object*)new_obj_ptr->offset();
+    new_object->SetClsn(updater_xc->owner.to_ptr());
     if (overwrite) {
-        volatile_write(new_object->_next, old_desc->_next);
+        new_object->SetNextPersistent(old_desc->GetNextPersistent());
+        new_object->SetNextVolatile(old_desc->GetNextVolatile());
         // I already claimed it, no need to use cas then
         volatile_write(ptr->_ptr, new_obj_ptr->_ptr);
-        version->mark_defunct();
         __sync_synchronize();
         return head;
-    }
-    else {
-        volatile_write(new_object->_next, head);
+    } else {
+        new_object->SetNextPersistent(old_desc->GetPersistentAddress());
+        new_object->SetNextVolatile(head);
         if (__sync_bool_compare_and_swap(&ptr->_ptr, head._ptr, new_obj_ptr->_ptr)) {
+            // Succeeded installing a new version, now only I can modify the
+            // chain, try recycle some objects
+            if(config::enable_gc) {
+              MM::gc_version_chain(ptr);
+            }
             return head;
         }
     }
@@ -920,215 +875,290 @@ sm_oid_mgr::oid_get_latest_version(FID f, OID o)
 }
 
 dbtuple*
-sm_oid_mgr::oid_get_latest_version(oid_array *oa, OID o)
-{
-    auto head_offset = oa->get(o)->offset();
-    if (head_offset)
-        return (dbtuple *)((object *)head_offset)->payload();
-    return NULL;
-}
-
-// Load the version from log if not present in memory
-// TODO: anti-caching
-fat_ptr*
-sm_oid_mgr::ensure_tuple(FID f, OID o, epoch_num e)
-{
-    return ensure_tuple(get_impl(this)->get_array(f), o, e);
-}
-
-fat_ptr*
-sm_oid_mgr::ensure_tuple(oid_array *oa, OID o, epoch_num e)
-{
-    fat_ptr *ptr = oa->get(o);
-    fat_ptr p = *ptr;
-    if (p.asi_type() == fat_ptr::ASI_LOG)
-        ensure_tuple(ptr, e);
-    return ptr;
-}
-
-// @ptr: address of an object_header
-// Returns address of an object
-fat_ptr
-sm_oid_mgr::ensure_tuple(fat_ptr *ptr, epoch_num epoch)
-{
-    fat_ptr p = *ptr;
-    if (p.asi_type() != fat_ptr::ASI_LOG) {
-        ASSERT(p.asi_type() == 0);
-        return p;
-    }
-
-    auto *obj = (object *)p.offset();
-
-    // obj->_pdest should point to some location in the log
-    ASSERT(obj->_pdest != NULL_PTR);
-    fat_ptr new_ptr = object::create_tuple_object(obj->_pdest, obj->_next, epoch);
-    ASSERT(new_ptr.offset());
-
-    // Now new_ptr should point to some location in memory
-    if (not __sync_bool_compare_and_swap(&ptr->_ptr, p._ptr, new_ptr._ptr)) {
-        MM::deallocate(new_ptr);
-        // somebody might acted faster, no need to retry
-    }
-    // FIXME: handle ASI_HEAP and ASI_EXT too
-    return *ptr;
-}
-
-dbtuple*
 sm_oid_mgr::oid_get_version(FID f, OID o, xid_context *visitor_xc)
 {
     ASSERT(f);
     return oid_get_version(get_impl(this)->get_array(f), o, visitor_xc);
 }
 
-dbtuple*
-sm_oid_mgr::oid_get_version(oid_array *oa, OID o, xid_context *visitor_xc)
-{
-start_over:
-    // must pui start_over above this, because we'll update pp later
-    fat_ptr *pp = oa->get(o);
-    fat_ptr ptr = *pp;
-    while (1) {
-        if (ptr.asi_type() != fat_ptr::ASI_LOG) {
-            ASSERT(ptr.asi_type() == 0);  // must be in memory
-        } else {
-            ptr = ensure_tuple(pp, visitor_xc->begin_epoch);
-        }
-
-        if (not ptr.offset())
-            break;
-
-        auto *cur_obj = (object*)ptr.offset();
-        pp = &cur_obj->_next;
-
-        // Must dereference this before reading cur_obj->_clsn:
-        // the version we're currently reading (ie cur_obj) might be unlinked
-        // and thus recycled by the memory allocator at any time if it's not
-        // a committed version. If so, cur_obj->_next will be pointing to some
-        // other object in the allocator's free object pool - we'll probably
-        // end up at la-la land if we followed this _next pointer value...
-        // Here we employ some flavor of OCC to solve this problem:
-        // the aborting transaction that will unlink cur_obj will update
-        // cur_obj->_clsn to NULL_PTR, then deallocate(). Before reading
-        // cur_obj->_clsn, we (as the visitor), first dereference pp to get
-        // a stable value that "should" contain the right address of the next
-        // version. We then read cur_obj->_clsn to verify: if it's NULL_PTR
-        // that means we might have read a wrong _next value that's actually
-        // pointing to some irrelevant object in the allocator's memory pool,
-        // hence must start over from the beginning of the version chain.
-        ptr = volatile_read(*pp);
-        auto clsn = volatile_read(cur_obj->_clsn);
-        if (clsn == NULL_PTR) {
-            // dead tuple that was (or about to be) unlinked, start over
-            goto start_over;
-        }
-
-        ALWAYS_ASSERT(clsn.asi_type() == fat_ptr::ASI_XID or clsn.asi_type() == fat_ptr::ASI_LOG);
-        // xid tracking & status check
-        if (clsn.asi_type() == fat_ptr::ASI_XID) {
-            /* Same as above: grab and verify XID context,
-               starting over if it has been recycled
-             */
-            auto holder_xid = XID::from_ptr(clsn);
-
-            // dirty data made by me is visible!
-            if (holder_xid == visitor_xc->owner) {
-                ASSERT(not cur_obj->_next.offset() or ((object *)cur_obj->_next.offset())->_clsn.asi_type() == fat_ptr::ASI_LOG);
-                return cur_obj->tuple();
-            }
-            auto* holder = xid_get_context(holder_xid);
-            if (not holder) // invalid XID (dead tuple, must retry than goto next in the chain)
-                goto start_over;
-
-            auto state = volatile_read(holder->state);
-            auto owner = volatile_read(holder->owner);
-
-            // context still valid for this XID?
-            if (unlikely(owner != holder_xid))
-                goto start_over;
-
-            if (state == TXN_CMMTD) {
-                ASSERT(volatile_read(holder->end));
-                ASSERT(owner == holder_xid);
-#if defined(RC) || defined(RC_SPIN)
-#ifdef SSN
-                if (config::enable_safesnap and visitor_xc->xct->flags & transaction::TXN_FLAG_READ_ONLY) {
-                    if (holder->end < visitor_xc->begin) {
-                        return cur_obj->tuple();
-                    }
-                }
-                else {
-                    return cur_obj->tuple();
-                }
-#else  // SSN
-                return cur_obj->tuple();
-#endif  // SSN
-#else  // not RC/RC_SPIN
-                if (holder->end < visitor_xc->begin) {
-                    return cur_obj->tuple();
-                } else {
-                    oid_check_phantom(visitor_xc, holder->end);
-                }
-#endif
-            } else {
-#ifdef RC_SPIN
-                // spin until the tx is settled (either aborted or committed)
-                if (spin_for_cstamp(holder_xid, holder) == TXN_CMMTD) {
-                    return cur_obj->tuple();
-                }
-#endif
-            }
-        }
-        else if (clsn.asi_type() == fat_ptr::ASI_LOG) {
-#if defined(RC) || defined(RC_SPIN)
-#if defined(SSN)
-            if (config::enable_safesnap and visitor_xc->xct->flags & transaction::TXN_FLAG_READ_ONLY) {
-                if (LSN::from_ptr(clsn).offset() <= visitor_xc->begin) {
-                    return cur_obj->tuple();
-                } else {
-                    oid_check_phantom(visitor_xc, clsn.offset());
-                }
-            } else {
-                return cur_obj->tuple();
-            }
-#else
-            return cur_obj->tuple();
-#endif
-#else  // Not RC
-            if (LSN::from_ptr(clsn).offset() <= visitor_xc->begin) {
-                return cur_obj->tuple();
-            } else {
-                oid_check_phantom(visitor_xc, clsn.offset());
-            }
-#endif
-        }
+dbtuple* sm_oid_mgr::BackupGetVersion(oid_array* ta, oid_array* pa, OID o, xid_context* xc) {
+  fat_ptr pdest_head_ptr = NULL_PTR;
+retry:
+  // See if we can find a fresh enough version in the tuple array
+  fat_ptr active_head_ptr = volatile_read(*ta->get(o));
+  ASSERT(active_head_ptr.asi_type() == 0);
+  Object* active_head_obj = (Object*)active_head_ptr.offset();
+  uint64_t active_head_lsn = active_head_obj == nullptr ? 0 :
+                             active_head_obj->GetClsn().offset();
+  ASSERT(!active_head_obj ||
+         active_head_obj->GetClsn().offset() ==
+         active_head_obj->GetPersistentAddress().offset());
+  if(active_head_lsn >= xc->begin) {
+    // First version not visible to me, so no need to look at the pdest
+    // array, versions indexed by the tuple array are enough.
+    return oid_get_version(ta, o, xc);
+  } else {
+    // First version visible to me, but not sure if there will be newer
+    // versions available for me to read, must look at the pdest array
+    // and dig out them from the log.
+    // Note: ptrs point to the log directly, making the lsns comparable
+    if(pdest_head_ptr == NULL_PTR) {
+      // Don't refresh pdest ptr, to save some resource
+      pdest_head_ptr = volatile_read(*pa->get(o));
+    }
+    fat_ptr ptr = pdest_head_ptr;
+    ASSERT(ptr.offset() == 0 || ptr.offset() >= active_head_lsn);
+    if(ptr.offset() == 0 || ptr.offset() == active_head_lsn) {
+      // Nothing new in the pdest array
+      return active_head_obj ? active_head_obj->GetPinnedTuple() : nullptr;
     }
 
-    return NULL;    // No Visible records
+    ALWAYS_ASSERT(ptr.asi_type() == fat_ptr::ASI_LOG);
+    ALWAYS_ASSERT(ptr.offset() > active_head_lsn);
+
+    // Dig out the first version until the latest one visible to me
+    Object* prev_obj = nullptr;
+    fat_ptr install_ptr = NULL_PTR;
+    Object* ret_obj = active_head_obj;
+    while(ptr.offset() > active_head_lsn) {
+      ASSERT(ptr.asi_type() == fat_ptr::ASI_LOG);  // Digging things out
+      size_t sz = sizeof(Object) + sizeof(dbtuple) + decode_size_aligned(ptr.size_code());;
+      sz = align_up(sz);
+      Object* obj = (Object*)MM::allocate(sz, 0);
+      // FIXME(tzwang): figure out how GC/epoch works with this
+      new(obj) Object(ptr, NULL_PTR, 0, false);  // Update next_ later
+      // TODO(tzawng): allow pinning the header part only (ie the varstr
+      // embedded in the payload) as the only purpose of Pin() here is to
+      // get to know the pdest of the overwritten version. (perhaps doesn't
+      // matter especially if using disk/SSD).
+      ASSERT(obj->GetNextPersistent() == NULL_PTR);
+      obj->Pin();  // obj.next_pdest becomes available after Pin()
+      ASSERT(obj->GetClsn().offset());
+      ASSERT(obj->GetClsn().offset() == obj->GetPersistentAddress().offset());
+      ASSERT(obj->GetNextPersistent() == NULL_PTR ||
+             obj->GetNextPersistent().asi_type() == fat_ptr::ASI_LOG);
+
+      // Setup volatile backward pointers
+      obj->SetNextVolatile(active_head_ptr);  // Default, might change later
+      if(prev_obj) {
+        prev_obj->SetNextVolatile(fat_ptr::make(obj, encode_size_aligned(sz), 0));
+      } else {
+        install_ptr = fat_ptr::make(obj, encode_size_aligned(sz), 0);
+      }
+      uint64_t clsn = obj->GetClsn().offset();
+      ASSERT(clsn > active_head_lsn);
+      if(xc->begin > clsn) {
+        // Done, no need to dig further
+        ASSERT(ret_obj == active_head_obj);
+        ret_obj = obj;
+        break;
+      }
+      prev_obj = obj;
+      ptr = obj->GetNextPersistent();
+      ASSERT((active_head_obj && ptr.offset()) || !active_head_obj);
+    }
+    ASSERT(ptr.offset() == active_head_lsn ||
+           ptr.offset() > active_head_lsn && ret_obj != active_head_obj);
+
+    // Install the chain on the tuple array slot (plain write as we locked it)
+    ALWAYS_ASSERT(install_ptr != NULL_PTR);
+    ALWAYS_ASSERT(install_ptr.asi_type() == 0);
+
+    bool success = __sync_bool_compare_and_swap(
+      &ta->get(o)->_ptr, active_head_ptr._ptr, install_ptr._ptr);
+    if(!success) {
+      fat_ptr to_free = install_ptr;
+      while(to_free != active_head_ptr) {
+        Object* to_free_obj = (Object*)to_free.offset();
+        fat_ptr next = to_free_obj->GetNextVolatile();
+        MM::deallocate(to_free);
+        to_free = next;
+      }
+      goto retry;
+    }
+    return ret_obj ? ret_obj->GetPinnedTuple() : nullptr;
+  }
 }
 
-void
-sm_oid_mgr::oid_unlink(FID f, OID o, void *object_payload)
-{
-    return oid_unlink(get_impl(this)->get_array(f), o, object_payload);
+// For tuple arrays only, i.e., entries are guaranteed to point to Objects.
+dbtuple*
+sm_oid_mgr::oid_get_version(oid_array *oa, OID o, xid_context *visitor_xc) {
+  fat_ptr* entry = oa->get(o);
+start_over:
+  fat_ptr ptr = volatile_read(*entry);
+  ASSERT(ptr.asi_type() == 0);
+  Object* prev_obj = nullptr;
+  while(ptr.offset()) {
+    Object *cur_obj = nullptr;
+    // Must read next_ before reading cur_obj->_clsn:
+    // the version we're currently reading (ie cur_obj) might be unlinked
+    // and thus recycled by the memory allocator at any time if it's not
+    // a committed version. If so, cur_obj->_next will be pointing to some
+    // other object in the allocator's free object pool - we'll probably
+    // end up at la-la land if we followed this _next pointer value...
+    // Here we employ some flavor of OCC to solve this problem:
+    // the aborting transaction that will unlink cur_obj will update
+    // cur_obj->_clsn to NULL_PTR, then deallocate(). Before reading
+    // cur_obj->_clsn, we (as the visitor), first dereference pp to get
+    // a stable value that "should" contain the right address of the next
+    // version. We then read cur_obj->_clsn to verify: if it's NULL_PTR
+    // that means we might have read a wrong _next value that's actually
+    // pointing to some irrelevant object in the allocator's memory pool,
+    // hence must start over from the beginning of the version chain.
+    fat_ptr tentative_next = NULL_PTR;
+    // If this is a backup server, then must see persistent_next to find out
+    // the **real** overwritten version.
+    if(config::is_backup_srv()) {
+      if(prev_obj) {
+        // See if we can just follow the volatile pointer without touching the log
+        fat_ptr prev_next_ptr = prev_obj->GetNextVolatile();
+        Object* prev_next_obj = (Object*)prev_next_ptr.offset();
+        ASSERT(prev_next_obj->GetClsn().offset() ==
+               prev_next_obj->GetPersistentAddress().offset());
+        if(prev_next_obj->GetClsn().offset() == prev_obj->GetNextPersistent().offset()) {
+          // No gap
+          ptr = prev_next_ptr;
+        }
+      }
+      if(ptr.asi_type() == fat_ptr::ASI_LOG) {
+        ASSERT(ptr.size_code() != INVALID_SIZE_CODE);
+        size_t alloc_sz = decode_size_aligned(ptr.size_code());
+        cur_obj = (Object*)MM::allocate(alloc_sz, visitor_xc->begin_epoch);
+        new(cur_obj) Object(ptr, NULL_PTR, visitor_xc->begin_epoch, false);
+        cur_obj->Pin();  // After this next_pdest_ is valid
+        ASSERT(cur_obj->GetClsn().offset());
+        ASSERT(prev_obj);
+        cur_obj->SetNextVolatile(prev_obj->GetNextVolatile());
+        fat_ptr newptr = fat_ptr::make(cur_obj, ptr.size_code(), 0);
+        if(!__sync_bool_compare_and_swap(&prev_obj->GetNextVolatilePtr()->_ptr,
+                                         ptr._ptr, newptr._ptr)) {
+          // If this CAS failed, then it must be somebody else who installed this
+          // immediate version
+          cur_obj = (Object*)prev_obj->GetNextVolatile().offset();
+          ASSERT(cur_obj);
+          ASSERT(cur_obj->GetClsn().offset() == ptr.offset());
+          ASSERT(cur_obj->GetPersistentAddress().offset() == ptr.offset());
+          MM::deallocate(newptr);
+        }
+      } else {
+        ASSERT(ptr.asi_type() == 0);
+        cur_obj = (Object*)ptr.offset();
+      }
+      ASSERT(cur_obj->GetClsn().offset());
+      ASSERT(!prev_obj || prev_obj->GetClsn().offset() > cur_obj->GetClsn().offset());
+      tentative_next = cur_obj->GetNextPersistent();
+      ASSERT(tentative_next == NULL_PTR || tentative_next.asi_type() == fat_ptr::ASI_LOG);
+    } else {
+      ASSERT(ptr.asi_type() == 0);
+      cur_obj = (Object*)ptr.offset();
+      tentative_next = cur_obj->GetNextVolatile();
+      ASSERT(tentative_next.asi_type() == 0);
+    }
+
+    bool retry = false;
+    bool visible = TestVisibility(cur_obj, visitor_xc, retry);
+    if(retry) {
+      goto start_over;
+    }
+    if(visible) {
+      return cur_obj->GetPinnedTuple();
+    }
+    ptr = tentative_next;
+    prev_obj = cur_obj;
+  }
+  return nullptr;    // No Visible records
 }
 
-void
-sm_oid_mgr::oid_unlink(oid_array *oa, OID o, void *object_payload)
-{
-    // Now the head is guaranteed to be the only dirty version
-    // because we unlink the overwritten dirty version in put,
-    // essentially this function ditches the head directly.
-    // Otherwise use the commented out old code.
-    auto *ptr = oa->get(o);
-    object *head_obj = (object *)ptr->offset();
-    ASSERT(head_obj->payload() == object_payload);
-    // using a CAS is overkill: head is guaranteed to be the (only) dirty version
-    volatile_write(ptr->_ptr, head_obj->_next._ptr);
-    __sync_synchronize();
-    // tzwang: The caller is responsible for deallocate() the head version
-    // got unlinked - a update of own write will record the unlinked version
-    // in the transaction's write-set, during abortor commit the version's
-    // pvalue needs to be examined. So oid_unlink() shouldn't deallocate()
-    // here. Instead, the transaction does it in during commit or abort.
-}
+bool sm_oid_mgr::TestVisibility(Object* object, xid_context* xc, bool& retry) {
+  fat_ptr clsn = object->GetClsn();
+  uint16_t asi_type = clsn.asi_type();
+  if(clsn == NULL_PTR) {
+    ASSERT(!config::is_backup_srv());
+    // dead tuple that was (or about to be) unlinked, start over
+    retry = true;
+    return false;
+  }
 
+  ALWAYS_ASSERT(asi_type == fat_ptr::ASI_XID || asi_type == fat_ptr::ASI_LOG);
+  if(asi_type == fat_ptr::ASI_XID) {  // in-flight
+    // Backups don't write
+    ASSERT(!config::is_backup_srv());
+
+    XID holder_xid = XID::from_ptr(clsn);
+    // Dirty data made by me is visible!
+    if(holder_xid == xc->owner) {
+      ASSERT(!object->GetNextVolatile().offset() ||
+             ((Object*)object->GetNextVolatile().offset())->GetClsn().asi_type() ==
+             fat_ptr::ASI_LOG);
+      ASSERT(!config::is_backup_srv());
+      return true;
+    }
+    auto* holder = xid_get_context(holder_xid);
+    if(!holder) {  // invalid XID (dead tuple, must retry than goto next in the chain)
+      retry = true;
+      return false;
+    }
+
+    auto state = volatile_read(holder->state);
+    auto owner = volatile_read(holder->owner);
+
+    // context still valid for this XID?
+    if(owner != holder_xid) {
+      ASSERT(!config::is_backup_srv());
+      retry = true;
+      return false;
+    }
+
+    if(state == TXN_CMMTD) {
+      ASSERT(volatile_read(holder->end));
+      ASSERT(owner == holder_xid);
+#if defined(RC) || defined(RC_SPIN)
+#ifdef SSN
+      if(config::enable_safesnap && (xc->xct->flags & transaction::TXN_FLAG_READ_ONLY)) {
+        if(holder->end < xc->begin) {
+          return true;
+        }
+      } else {
+        return true;
+      }
+#else  // SSN
+      return true;
+#endif  // SSN
+#else  // not RC/RC_SPIN
+      if(holder->end < xc->begin) {
+        return true;
+      } else {
+        oid_check_phantom(xc, holder->end);
+      }
+#endif
+    }
+  } else {
+    // Already committed, now do visibility test
+    ASSERT(object->GetPersistentAddress().asi_type() == fat_ptr::ASI_LOG ||
+           object->GetPersistentAddress().asi_type() == fat_ptr::ASI_CHK ||
+           object->GetPersistentAddress() == NULL_PTR); // Delete
+    uint64_t lsn_offset = LSN::from_ptr(clsn).offset();
+#if defined(RC) || defined(RC_SPIN)
+#if defined(SSN)
+    if(config::enable_safesnap && (xc->xct->flags & transaction::TXN_FLAG_READ_ONLY)) {
+      if(lsn_offset <= xc->begin) {
+        return true;
+      } else {
+        oid_check_phantom(xc, clsn.offset());
+      }
+    } else {
+      return true;
+    }
+#else
+    return true;
+#endif
+#else  // Not RC
+    if(lsn_offset <= xc->begin) {
+      return true;
+    } else {
+      oid_check_phantom(xc, clsn.offset());
+    }
+#endif
+  }
+  return false;
+}

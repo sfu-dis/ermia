@@ -6,7 +6,9 @@
 #include <future>
 
 #include "sm-alloc.h"
+#include "sm-chkpt.h"
 #include "sm-common.h"
+#include "sm-object.h"
 #include "../txn.h"
 
 namespace MM {
@@ -59,10 +61,10 @@ prepare_node_memory() {
   allocated_node_memory = (uint64_t *)malloc(sizeof(uint64_t) * config::numa_nodes);
   node_memory = (char **)malloc(sizeof(char *) * config::numa_nodes);
   std::vector<std::future<void> > futures;
-  std::cout << "Will run and allocate on " << config::numa_nodes << " nodes, "
-            << config::node_memory_gb << "GB each\n";
+  LOG(INFO) << "Will run and allocate on " << config::numa_nodes << " nodes, "
+            << config::node_memory_gb << "GB each";
   for(int i = 0; i < config::numa_nodes; i++) {
-    std::cout << "Allocating " << config::node_memory_gb << "GB on node " << i << std::endl;
+    LOG(INFO) << "Allocating " << config::node_memory_gb << "GB on node " << i;
     auto f = [=]{
         ALWAYS_ASSERT(config::node_memory_gb);
         allocated_node_memory[i] = 0;
@@ -73,7 +75,7 @@ prepare_node_memory() {
         THROW_IF(node_memory[i] == nullptr or node_memory[i] == MAP_FAILED,
             os_error, errno, "Unable to allocate huge pages");
         ALWAYS_ASSERT(node_memory[i]);
-        std::cout << "Allocated " << config::node_memory_gb << "GB on node " << i << std::endl;
+        LOG(INFO) << "Allocated " << config::node_memory_gb << "GB on node " << i;
     };
     futures.push_back(std::async(std::launch::async, f));
   }
@@ -84,7 +86,7 @@ prepare_node_memory() {
 
 void gc_version_chain(fat_ptr* oid_entry) {
   fat_ptr ptr = *oid_entry;
-  object* cur_obj = (object*)ptr.offset();
+  Object* cur_obj = (Object*)ptr.offset();
   if(!cur_obj) {
     // Tuple is deleted, skip
     return;
@@ -94,35 +96,45 @@ void gc_version_chain(fat_ptr* oid_entry) {
   // because the head might be still being modified (hence its _next field)
   // and might be gone any time (tx abort). Skip records in chkpt file as
   // well - not even in memory.
-  auto clsn = volatile_read(cur_obj->_clsn);
+  auto clsn = cur_obj->GetClsn();
   fat_ptr* prev_next = nullptr;
+  if(clsn.asi_type() == fat_ptr::ASI_CHK) {
+    return;
+  }
   if(clsn.asi_type() != fat_ptr::ASI_LOG) {
-    ASSERT(clsn.asi_type() == fat_ptr::ASI_XID);
-    ptr = volatile_read(cur_obj->_next);
-    cur_obj = (object*)ptr.offset();
+    DCHECK(clsn.asi_type() == fat_ptr::ASI_XID);
+    ptr = cur_obj->GetNextVolatile();
+    cur_obj = (Object*)ptr.offset();
   }
 
   // Now cur_obj should be the fisrt committed version, continue to the version
   // that can be safely recycled (the version after cur_obj).
-  ptr = volatile_read(cur_obj->_next);
-  prev_next = &cur_obj->_next;
+  ptr = cur_obj->GetNextVolatile();
+  prev_next = cur_obj->GetNextVolatilePtr();
 
   while(ptr.offset()) {
-    cur_obj = (object*)ptr.offset();
-    clsn = volatile_read(cur_obj->_clsn);
+    cur_obj = (Object*)ptr.offset();
+    clsn = cur_obj->GetClsn();
     if(clsn == NULL_PTR || clsn.asi_type() != fat_ptr::ASI_LOG) {
       // Might already got recycled, give up
       break;
     }
-    ptr = cur_obj->_next;
-    prev_next = &cur_obj->_next;
-    // Fast forward to the **second** version < gc_lsn. Consider that we set safesnap
-    // lsn to 1.8, and gc_lsn to 1.6. Assume we have two versions with LSNs 2 and 1.5.
-    // We need to keep the one with LSN=1.5 although its < gc_lsn; otherwise the tx
-    // using safesnap won't be able to find any version available.
-    // No need to CAS here if we only have one gc thread
+    ptr = cur_obj->GetNextVolatile();
+    prev_next = cur_obj->GetNextVolatilePtr();
+    // If the chkpt needs to be a consistent one, must make sure not to GC a version
+    // that might be needed by chkpt:
+    // uint64_t glsn = std::min(logmgr->durable_flushed_lsn().offset(), volatile_read(gc_lsn));
+    // This makes the GC thread has to traverse longer in the chain, unless
+    // with small log buffers or frequent log flush, which is bad for disk performance.
+    // For good performance, we use inconsistent chkpt which grabs the latest committed
+    // version directly. Log replay after the chkpt-start lsn is necessary for correctness.
     uint64_t glsn = volatile_read(gc_lsn);
     if(LSN::from_ptr(clsn).offset() <= glsn && ptr._ptr) {
+      // Fast forward to the **second** version < gc_lsn. Consider that we set safesnap
+      // lsn to 1.8, and gc_lsn to 1.6. Assume we have two versions with LSNs 2 and 1.5.
+      // We need to keep the one with LSN=1.5 although its < gc_lsn; otherwise the tx
+      // using safesnap won't be able to find any version available.
+      //
       // We only traverse and GC a version chain when an update transaction successfully
       // installed a version. So at any time there will be only one guy possibly doing
       // this for a version chain - just blind write. If we're traversing at other times,
@@ -130,13 +142,13 @@ void gc_version_chain(fat_ptr* oid_entry) {
       // __sync_bool_compare_and_swap(&prev_next->_ptr, ptr._ptr, 0)) {
       volatile_write(prev_next->_ptr, 0);
       while(ptr.offset()) {
-        cur_obj = (object*)ptr.offset();
-        clsn = volatile_read(cur_obj->_clsn);
+        cur_obj = (Object*)ptr.offset();
+        clsn = cur_obj->GetClsn();
         ALWAYS_ASSERT(clsn.asi_type() == fat_ptr::ASI_LOG);
         ALWAYS_ASSERT(LSN::from_ptr(clsn).offset() <= glsn);
-        fat_ptr next_ptr = cur_obj->_next;
-        volatile_write(cur_obj->_clsn, NULL_PTR);
-        volatile_write(cur_obj->_next, NULL_PTR);
+        fat_ptr next_ptr = cur_obj->GetNextVolatile();
+        cur_obj->SetClsn(NULL_PTR);
+        cur_obj->SetNextVolatile(NULL_PTR);
         if(!tls_free_object_pool) {
           tls_free_object_pool = new TlsFreeObjectPool;
         }
@@ -179,8 +191,7 @@ void *allocate(size_t size, epoch_num e) {
 
 out:
     if(not p) {
-      std::cout << "Out of memory\n";
-      ALWAYS_ASSERT(p);
+      LOG(FATAL) << "Out of memory";
     }
     epoch_tls.nbytes += size;
     epoch_tls.counts += 1;
@@ -203,9 +214,9 @@ void deallocate(fat_ptr p) {
   ASSERT(p != NULL_PTR);
   ASSERT(p.size_code());
   ASSERT(p.size_code() != INVALID_SIZE_CODE);
-  object *obj = (object *)p.offset();
-  volatile_write(obj->_next, NULL_PTR);
-  volatile_write(obj->_clsn, NULL_PTR);
+  Object* obj = (Object*)p.offset();
+  obj->SetNextVolatile(NULL_PTR);
+  obj->SetClsn(NULL_PTR);
   if(!tls_free_object_pool) {
     tls_free_object_pool = new TlsFreeObjectPool;
   }

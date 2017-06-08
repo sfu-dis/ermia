@@ -1,6 +1,7 @@
 #pragma once
 
 #include "macros.h"
+#include "dbcore/sm-common.h"
 
 #ifdef MASSTREE
 #include "prefetch.h"
@@ -30,6 +31,12 @@ public:
     return memcmp(data(), that.data(), size()) == 0;
   }
 
+  inline varstr& operator=(const varstr& other) {
+    p = other.p;
+    l = other.l;
+    return *this;
+  }
+
   inline bool operator!=(const varstr &that) const { return !operator==(that); }
 
   inline bool operator<(const varstr &that) const {
@@ -46,10 +53,14 @@ public:
 
   inline bool operator>(const varstr &that) const { return !operator<=(that); }
 
+  inline int compare(const varstr &that) const {
+    return memcmp(data(), that.data(), std::min(size(), that.size()));
+  }
+
   inline uint64_t slice() const {
     uint64_t ret = 0;
     uint8_t *rp = (uint8_t *) &ret;
-    for (uint32_t i = 0; i < std::min(l, uint32_t(8)); i++)
+    for (uint32_t i = 0; i < std::min(l, uint64_t(8)); i++)
       rp[i] = p[i];
     return util::host_endian_trfm<uint64_t>()(ret);
   }
@@ -81,6 +92,7 @@ public:
   }
 #endif
 
-  uint32_t l;
+  uint64_t l;
+  fat_ptr ptr;
   const uint8_t *p; // must be the last field
 };

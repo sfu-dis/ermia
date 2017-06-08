@@ -14,25 +14,24 @@
 #include <utility>
 #include <atomic>
 
-#include "log2.hh"
-#include "ndb_type_traits.h"
+#include "dbcore/sm-alloc.h"
+#include "dbcore/sm-index.h"
+#include "dbcore/sm-object.h"
+#include "dbcore/sm-oid.h"
+
 #include "macros.h"
 #include "prefetch.h"
 #include "util.h"
 
-#include "masstree/masstree_scan.hh"
 #include "masstree/masstree_insert.hh"
 #include "masstree/masstree_remove.hh"
+#include "masstree/masstree_scan.hh"
 #include "masstree/masstree_print.hh"
 #include "masstree/timestamp.hh"
 #include "masstree/mtcounters.hh"
 #include "masstree/circular_int.hh"
 
-#include "object.h"
 #include "tuple.h"
-
-#include "dbcore/sm-oid.h"
-#include "dbcore/sm-alloc.h"
 
 class simple_threadinfo {
  public:
@@ -122,12 +121,12 @@ class simple_threadinfo {
 
     // memory allocation
     void* allocate(size_t sz, memtag) {
-      object *obj = (object *)MM::allocate(sz + sizeof(object), epoch_);
-      new (obj) object(NULL_PTR, NULL_PTR, epoch_);
-      return obj->payload();
+      Object* obj = (Object *)MM::allocate(sz + sizeof(Object), epoch_);
+      new(obj) Object(NULL_PTR, NULL_PTR, epoch_, true);
+      return obj->GetPayload();
     }
     void deallocate(void* p, size_t sz, memtag) {
-      MM::deallocate(fat_ptr::make((char *)p - sizeof(object), encode_size_aligned(sz)));
+      MM::deallocate(fat_ptr::make((char *)p - sizeof(Object), encode_size_aligned(sz)));
     }
     void deallocate_rcu(void *p, size_t sz, memtag m) {
       deallocate(p, sz, m);  // FIXME(tzwang): add rcu callback support
@@ -182,33 +181,6 @@ class mbtree {
 
   void invariant_checker() {} // stub for now
 
-#ifdef BTREE_LOCK_OWNERSHIP_CHECKING
-public:
-  static inline void
-  NodeLockRegionBegin()
-  {
-    // XXX: implement me
-    ALWAYS_ASSERT(false);
-    //ownership_checker<mbtree<P>, node_base_type>::NodeLockRegionBegin();
-  }
-  static inline void
-  AssertAllNodeLocksReleased()
-  {
-    // XXX: implement me
-    ALWAYS_ASSERT(false);
-    //ownership_checker<mbtree<P>, node_base_type>::AssertAllNodeLocksReleased();
-  }
-private:
-  static inline void
-  AddNodeToLockRegion(const node_base_type *n)
-  {
-    // XXX: implement me
-    ALWAYS_ASSERT(false);
-    //ownership_checker<mbtree<P>, node_base_type>::AddNodeToLockRegion(n);
-  }
-public:
-#endif
-
   mbtree() {
     threadinfo ti(0);
     table_.initialize(ti);
@@ -219,13 +191,23 @@ public:
     table_.destroy(ti);
   }
 
-  inline oid_array *get_oid_array() {
-    return table_.get_oid_array();
+  inline void set_arrays(IndexDescriptor* id) {
+    tuple_array_ = id->GetTupleArray();
+    is_primary_idx_ = id->IsPrimary();
+    descriptor_ = id;
+    ALWAYS_ASSERT(tuple_array_);
+    table_.set_tuple_array(tuple_array_);
+    if(config::is_backup_srv()) {
+      pdest_array_ = id->GetPersistentAddressArray();
+      ALWAYS_ASSERT(pdest_array_);
+    } else {
+      pdest_array_ = nullptr;
+    }
+    table_.set_pdest_array(pdest_array_);
   }
 
-  inline void set_oid_array(oid_array *oa) {
-    table_.set_oid_array(oa);
-  }
+  inline IndexDescriptor* get_descriptor() { return descriptor_; }
+  inline bool is_primary_idx() { return is_primary_idx_; }
 
   /**
    * NOT THREAD SAFE
@@ -379,8 +361,7 @@ public:
    * is written into old_v
    */
   inline bool
-  insert(const key_type &k, dbtuple * v, xid_context *xc,
-         value_type *old_v = NULL,
+  insert(const key_type &k, OID o, xid_context *xc, value_type *old_oid = NULL,
          insert_info_t *insert_info = NULL);
 
   /**
@@ -388,7 +369,7 @@ public:
    * if k inserted, false otherwise (k exists already)
    */
   inline bool
-  insert_if_absent(const key_type &k, OID o, dbtuple * v, xid_context *xc,
+  insert_if_absent(const key_type &k, OID o, xid_context *xc,
                    insert_info_t *insert_info = NULL);
 
   /**
@@ -460,6 +441,10 @@ public:
 
  private:
   Masstree::basic_table<P> table_;
+  oid_array* pdest_array_;
+  oid_array* tuple_array_;
+  bool is_primary_idx_;
+  IndexDescriptor* descriptor_;
 
   static leaf_type* leftmost_descend_layer(node_base_type* n);
   class size_walk_callback;
@@ -575,7 +560,11 @@ inline bool mbtree<P>::search(const key_type &k, OID &o, dbtuple* &v, xid_contex
   if (found)
   {
 	  o = lp.value();
-      v = oidmgr->oid_get_version(table_.get_oid_array(), o, xc);
+    if(config::is_backup_srv()) {
+      v = oidmgr->BackupGetVersion(tuple_array_, pdest_array_, o, xc);
+    } else {
+      v = oidmgr->oid_get_version(tuple_array_, o, xc);
+    }
 	  if( !v )
 		  found = false;
   }
@@ -585,18 +574,17 @@ inline bool mbtree<P>::search(const key_type &k, OID &o, dbtuple* &v, xid_contex
 }
 
 template <typename P>
-inline bool mbtree<P>::insert(const key_type &k, dbtuple * v, xid_context *xc,
-                              value_type *old_v,
-                              insert_info_t *insert_info)
+inline bool mbtree<P>::insert(const key_type &k, OID o, xid_context *xc,
+                              value_type *old_oid, insert_info_t *insert_info)
 {
   threadinfo ti(xc->begin_epoch);
   Masstree::tcursor<P> lp(table_, k.data(), k.size());
   bool found = lp.find_insert(ti);
   if (!found)
     ti.advance_timestamp(lp.node_timestamp());
-  if (found && old_v)
-    *old_v = lp.value();
-  lp.value() = v;
+  if (found && old_oid)
+    *old_oid = lp.value();
+  lp.value() = o;
   if (insert_info) {
     insert_info->node = lp.node();
     insert_info->old_version = lp.previous_full_version_value();
@@ -607,10 +595,8 @@ inline bool mbtree<P>::insert(const key_type &k, dbtuple * v, xid_context *xc,
 }
 
 template <typename P>
-inline bool mbtree<P>::insert_if_absent(const key_type &k, OID o, dbtuple * v,
-                                        xid_context *xc,
-                                        insert_info_t *insert_info)
-{
+inline bool mbtree<P>::insert_if_absent(const key_type &k, OID o,
+                                        xid_context *xc, insert_info_t *insert_info) {
   // Recovery will give a null xc, use epoch 0 for the memory allocated
   epoch_num e = 0;
   if (xc) {
@@ -629,12 +615,10 @@ insert_new:
       insert_info->old_version = lp.previous_full_version_value();
       insert_info->new_version = lp.next_full_version_value(1);
     }
-  }
-  else
-  {
+  } else if(is_primary_idx_) {
 	  // we have two cases: 1) predecessor's inserts are still remaining in tree, even though version chain is empty or 2) somebody else are making dirty data in this chain. If it's the first case, version chain is considered empty, then we retry insert.
 	  OID oid = lp.value();
-	  if (oidmgr->oid_get_latest_version(table_.get_oid_array(), oid))
+	  if (oidmgr->oid_get_latest_version(tuple_array_, oid))
 		  found = true;
 	  else
 		  goto insert_new;
@@ -656,7 +640,7 @@ inline bool mbtree<P>::remove(const key_type &k, xid_context* xc, dbtuple * *old
   Masstree::tcursor<P> lp(table_, k.data(), k.size());
   bool found = lp.find_locked(ti);
   if (found && old_v)
-	  *old_v = oidmgr->oid_get_latest_version(table_.get_oid_array(), lp.value());
+	  *old_v = oidmgr->oid_get_latest_version(tuple_array_, lp.value());
 	  // XXX. need to look at lp.finish that physically removes records in tree and hack it if necessary.
   lp.finish(found ? -1 : 0, ti);
   return found;
@@ -674,7 +658,7 @@ class mbtree<P>::search_range_scanner_base {
     int min = std::min((int)boundary_->size(), key.prefix_length());
     int cmp = memcmp(boundary_->data(), key.full_string().data(), min);
     if (!Reverse) {
-      if (cmp < 0 || (cmp == 0 && (int)boundary_->size() <= key.prefix_length()))
+      if (cmp < 0 || (cmp == 0 && boundary_->size() <= key.prefix_length()))
         boundary_compar_ = true;
       else if (cmp == 0) {
         uint64_t last_ikey = iter.node()->ikey0_[iter.permutation()[iter.permutation().size() - 1]];

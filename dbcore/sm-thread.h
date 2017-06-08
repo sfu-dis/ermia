@@ -37,6 +37,7 @@ struct sm_thread {
   uint8_t state;
   task_t task;
   char *task_input;
+  bool sleep_when_idle;
 
   std::condition_variable trigger;
   std::mutex trigger_lock;
@@ -46,8 +47,22 @@ struct sm_thread {
     core(c),
     shutdown(false),
     state(kStateNoWork),
-    task(nullptr) {
+    task(nullptr),
+    sleep_when_idle(true) {
     thd = std::move(std::thread(&sm_thread::idle_task, this));
+    // Make sure we run on a physical core, not a hyper thread
+    if(config::htt_is_on) {
+      // Assuming a topology where all physical cores are listed first,
+      // ie 16-core cpu, 2-socket: 0-15 will be physical cores, 16 and
+      // beyond are hyper threads.
+      cpu_set_t cpuset;
+      CPU_ZERO(&cpuset);
+      //CPU_SET(core + node * config::max_threads_per_node, &cpuset);
+      CPU_SET(node + 4 * core, &cpuset);
+      int rc = pthread_setaffinity_np(thd.native_handle(),
+                                      sizeof(cpu_set_t), &cpuset);
+      ALWAYS_ASSERT(rc == 0);
+    }
   }
 
   ~sm_thread() {}
@@ -147,8 +162,7 @@ inline void put_thread(sm_thread *t) {
 // A wrapper that includes sm_thread for user code to use.
 // Benchmark and log replay threads deal with this only,
 // not with sm_thread.
-class sm_runner {
-public:
+struct sm_runner {
   sm_runner() : me(nullptr) {}
   ~sm_runner() {
     if (me) {
@@ -164,9 +178,12 @@ public:
     me->start_task(t);
   }
 
-  inline bool try_impersonate() {
+  inline bool try_impersonate(bool sleep_when_idle = true) {
     ALWAYS_ASSERT(not me);
     me = thread::get_thread();
+    if(me) {
+      me->sleep_when_idle = sleep_when_idle;
+    }
     return me != nullptr;
   }
 
@@ -175,6 +192,9 @@ public:
     put_thread(me);
     me = nullptr;
   }
+  // Same as join(), but don't return the thread
+  inline void wait() { me->join(); }
+  inline bool try_wait() { return me->try_join(); }
   inline bool is_impersonated() { return me != nullptr; }
   inline bool try_join() {
     if (me->try_join()) {
@@ -185,7 +205,6 @@ public:
     return false;
   }
 
-private:
   sm_thread *me;
 };
 }  // namespace thread

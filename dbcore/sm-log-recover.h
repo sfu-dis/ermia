@@ -66,7 +66,8 @@ struct sm_log_recover_mgr : sm_log_offset_mgr {
             return log_block{0,0,INVALID_LSN,{LOG_NOP,INVALID_SIZE_CODE,0,0,{INVALID_LSN}}};
         }
     
-        block_scanner(sm_log_recover_mgr *lm, LSN start, bool follow_overflow, bool fetch_payloads);
+        block_scanner(sm_log_recover_mgr *lm, LSN start, bool follow_overflow,
+                      bool fetch_payloads, bool force_fetch_from_logbuf);
         ~block_scanner();
 
         bool valid() { return _cur_block and _cur_block->lsn != INVALID_LSN; }
@@ -89,6 +90,7 @@ struct sm_log_recover_mgr : sm_log_offset_mgr {
         sm_log_recover_mgr *_lm;
         bool _follow_overflow;
         bool _fetch_payloads;
+        bool _force_fetch_from_logbuf;
         log_block *_buf;
         log_block *_cur_block;
     };
@@ -117,7 +119,8 @@ struct sm_log_recover_mgr : sm_log_offset_mgr {
             operator char *() { return ptr; }
         };
 
-        log_scanner(sm_log_recover_mgr *lm, LSN start, bool fetch_payloads);
+        log_scanner(sm_log_recover_mgr *lm, LSN start,
+                    bool fetch_payloads, bool force_fetch_from_logbuf);
 
         bool valid() { return _bscan.valid() and _i < _bscan->nrec; }
 
@@ -151,6 +154,8 @@ struct sm_log_recover_mgr : sm_log_offset_mgr {
        enough to hold the object.
      */
     void load_object(char *buf, size_t bufsz, fat_ptr ptr, int align_bits=DEFAULT_ALIGNMENT_BITS);
+    void load_object_from_logbuf(char *buf, size_t bufsz, fat_ptr ptr,
+                                 int align_bits=DEFAULT_ALIGNMENT_BITS);
 
     /* A convenience method that can be used instead of load_object
        when the object to be loaded is an ext_ptr payload.
@@ -162,10 +167,15 @@ struct sm_log_recover_mgr : sm_log_offset_mgr {
     ~sm_log_recover_mgr();
 
     sm_log_scan_mgr *scanner;
+    sm_log_scan_mgr *logbuf_scanner;  // Dedicated for backup to redo from the logbuf
     sm_log_recover_impl *recover_functor;
+    sm_log_recover_impl *logbuf_redo_functor;
     void *recover_functor_arg;
 
-    void redo_log(LSN chkpt_start_lsn, LSN chkpt_end_lsn);
+    void redo_log(LSN start_lsn, LSN end_lsn);
+    // For log shipping only
+    void redo_logbuf(LSN start, LSN end);
+    void recover();
 };
 
 #endif

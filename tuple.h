@@ -4,15 +4,11 @@
 #include "macros.h"
 #include "util.h"
 
-#include "reader_writer.h"
 #include "dbcore/xid.h"
 #include "dbcore/sm-alloc.h"
 #include "dbcore/serial.h"
 
 using namespace TXN;
-
-// differentiate with delete case (pvalue = null)
-#define DEFUNCT_TUPLE_MARK ((varstr *)0x1)
 
 #ifdef SSN
 // Indicate somebody has read this tuple and thought it was an old one
@@ -26,9 +22,6 @@ using namespace TXN;
  */
 struct dbtuple {
 public:
-  typedef uint32_t size_type;
-  typedef varstr string_type;
-
 #if defined(SSN) || defined(SSI)
   readers_list::bitmap_t   readers_bitmap;   // bitmap of in-flight readers
   fat_ptr sstamp;          // successor (overwriter) stamp (\pi in ssn), set to writer XID during
@@ -48,12 +41,12 @@ public:
                 // it will become the X in the dangerous structure above
                 // and must abort.
 #endif
-  size_type size; // actual size of record
+  uint32_t size; // actual size of record
   varstr *pvalue;    // points to the value that will be put into value_start if committed
                      // so that read-my-own-update can copy from here.
   uint8_t value_start[0];   // must be last field
 
-  dbtuple(size_type size)
+  dbtuple(uint32_t size)
     :
 #if defined(SSN) || defined(SSI)
       sstamp(NULL_PTR),
@@ -71,7 +64,6 @@ public:
   ~dbtuple() {}
 
   enum ReadStatus {
-    READ_FAILED,
     READ_EMPTY,
     READ_RECORD,
   };
@@ -88,7 +80,7 @@ public:
     XID owner = volatile_read(visitor->owner);
 
   retry:
-    fat_ptr cstamp = volatile_read(get_object()->_clsn);
+    fat_ptr cstamp = GetObject()->GetClsn();
 
     if (cstamp.asi_type() == fat_ptr::ASI_XID) {
       XID xid = XID::from_ptr(cstamp);
@@ -155,44 +147,24 @@ public:
     return &value_start[0];
   }
 
-  inline ALWAYS_INLINE object*
-  get_object()
-  {
-    object *obj = (object *)((char *)this - sizeof(object));
-    ASSERT(obj->payload() == (char *)this);
+  inline Object* GetObject() {
+    Object* obj = (Object*)((char *)this - sizeof(Object));
+    ASSERT(obj->GetPayload() == (char *)this);
     return obj;
   }
 
-  inline ALWAYS_INLINE dbtuple*
-  next()
-  {
-    object *myobj = get_object();
-    ASSERT(myobj->payload() == (char *)this);
-    if (myobj->_next.offset())
-      return (dbtuple *)((object *)myobj->_next.offset())->payload();
-    else
-      return NULL;
-  }
-
-  inline ALWAYS_INLINE bool
-  is_defunct()
-  {
-    return volatile_read(pvalue) == DEFUNCT_TUPLE_MARK;
-  }
-
-  inline ALWAYS_INLINE void
-  mark_defunct()
-  {
-    // pvalue is only readable by the writer itself,
-    // so this won't confuse readers.
-    volatile_write(pvalue, DEFUNCT_TUPLE_MARK);
+  inline dbtuple* NextVolatile() {
+    // So far this is only used by the primary
+    ALWAYS_ASSERT(!config::is_backup_srv());
+    Object* myobj = GetObject();
+    ASSERT(myobj->GetPayload() == (char *)this);
+    uint64_t next_off = myobj->GetNextVolatile().offset();
+    return next_off ? GetObject()->GetPinnedTuple() : nullptr;
   }
 
 private:
-  static inline ALWAYS_INLINE size_type
-  CheckBounds(size_type s)
-  {
-    ASSERT(s <= std::numeric_limits<size_type>::max());
+  static inline ALWAYS_INLINE uint32_t CheckBounds(uint32_t s) {
+    ASSERT(s <= std::numeric_limits<uint32_t>::max());
     return s;
   }
 
@@ -201,22 +173,18 @@ public:
   // Note: the stable=false option will try to read from pvalue,
   // instead of the real data area; so giving stable=false is only
   // safe for the updating transaction itself to read its own write.
-  do_read(value_reader &reader, str_arena &sa, bool stable) const
-  {
-    const uint8_t *data = NULL;
-    if (stable)
-      data = get_value_start();
-    else {
+  do_read(varstr* out_v, bool stable) const {
+    if(stable) {
+      out_v->p = get_value_start();
+    } else {
       if (not pvalue) {   // so I just deleted this tuple... return empty?
         ASSERT(not size);
         return READ_EMPTY;
       }
-      data = pvalue->data();
+      out_v->p = pvalue->data();
       ASSERT(pvalue->size() == size);
     }
-
-    if (unlikely(size && !reader(data, size, sa)))
-      return READ_FAILED;
+    out_v->l = size;
     return size ? READ_RECORD : READ_EMPTY;
   }
 
@@ -224,7 +192,6 @@ public:
   inline ALWAYS_INLINE void
   do_write() const
   {
-    ASSERT(pvalue != DEFUNCT_TUPLE_MARK);
     if (pvalue) {
       ASSERT(pvalue->size() == size);
       memcpy((void *)get_value_start(), pvalue->data(), pvalue->size());

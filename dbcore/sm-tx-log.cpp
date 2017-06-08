@@ -29,7 +29,6 @@ namespace {
 }
 
 void
-
 sm_tx_log::log_insert_index(FID f, OID o, fat_ptr ptr, int abits, fat_ptr *pdest) {
     get_log_impl(this)->add_payload_request(LOG_INSERT_INDEX, f, o, ptr, abits, pdest);
 }
@@ -45,16 +44,22 @@ sm_tx_log::log_update(FID f, OID o, fat_ptr ptr, int abits, fat_ptr *pdest) {
 }
 
 void
-sm_tx_log::log_fid(FID f, const std::string &name)
+sm_tx_log::log_update_key(FID f, OID o, fat_ptr ptr, int abits) {
+    get_log_impl(this)->add_payload_request(LOG_UPDATE_KEY, f, o, ptr, abits, nullptr);
+}
+
+void
+sm_tx_log::log_index(FID tuple_fid, FID key_fid, const std::string &name)
 {
-    auto size = align_up(name.length() + 1);
+    auto size = align_up(sizeof(FID) + name.length() + 1);
     auto size_code = encode_size_aligned(size);
     char *buf = (char *)malloc(size);
     memset(buf, '\0', size);
-    memcpy(buf, (char *)name.c_str(), name.length());
-    ASSERT(buf[name.length()] == '\0');
+    memcpy(buf, (char *)&key_fid, sizeof(key_fid));
+    memcpy(buf + sizeof(FID), (char *)name.c_str(), name.length());
+    ASSERT(buf[sizeof(FID) + name.length()] == '\0');
     // only use the logrec's fid field, payload is name
-    get_log_impl(this)->add_payload_request(LOG_FID, f, 0,
+    get_log_impl(this)->add_payload_request(LOG_FID, tuple_fid, 0,
                             fat_ptr::make(buf, size_code),
                             DEFAULT_ALIGNMENT_BITS, NULL);
 }
@@ -93,6 +98,10 @@ void
 sm_tx_log::log_delete(FID f, OID o) {
     log_request req = make_log_request(LOG_DELETE, f, o, NULL_PTR, 0);
     get_log_impl(this)->add_request(req);
+}
+
+void sm_tx_log::log_enhanced_delete(FID f, OID o, fat_ptr ptr, int abits) {
+  get_log_impl(this)->add_payload_request(LOG_ENHANCED_DELETE, f, o, ptr, abits, nullptr);
 }
 
 LSN

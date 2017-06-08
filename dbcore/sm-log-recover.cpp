@@ -1,3 +1,4 @@
+#include "sm-chkpt.h"
 #include "sm-log-recover.h"
 #include "sm-log-recover-impl.h"
 #include "sm-log-impl.h"
@@ -11,12 +12,14 @@ using namespace RCU;
 sm_log_recover_mgr::sm_log_recover_mgr(sm_log_recover_impl *rf, void *rf_arg)
     : sm_log_offset_mgr()
     , scanner(new sm_log_scan_mgr_impl{this})
+    , logbuf_scanner(nullptr)
     , recover_functor(rf)
+    , logbuf_redo_functor(nullptr)
     , recover_functor_arg(rf_arg)
 {
     LSN dlsn = get_durable_mark();
     bool changed = false;
-    for (block_scanner it(this, dlsn, false, true); it.valid(); ++it) {
+    for (block_scanner it(this, dlsn, false, true, false); it.valid(); ++it) {
         // durable up to this point, but maybe no further
         if (it->checksum != it->full_checksum())
             break;
@@ -29,19 +32,35 @@ sm_log_recover_mgr::sm_log_recover_mgr(sm_log_recover_impl *rf, void *rf_arg)
         update_durable_mark(dlsn);
     
     auto *sid = get_segment(dlsn.segment());
-    truncate_after(sid->segnum, dlsn.offset());
-
-    sm_oid_mgr::create(get_chkpt_start(), this);
-    ASSERT(oidmgr);
-
-    if (rf and sm_log::need_recovery)
-        redo_log(get_chkpt_start(), LSN{~uint64_t{0}});  // till end of log
+    if(!config::is_backup_srv()) {
+      truncate_after(sid->segnum, dlsn.offset());
+    }
+    if(config::replay_policy != config::kReplayNone && config::is_backup_srv()) {
+      logbuf_redo_functor = new parallel_offset_replay;
+      logbuf_scanner = new sm_log_scan_mgr_impl{this};
+    }
 }
 
 void
-sm_log_recover_mgr::redo_log(LSN chkpt_start_lsn, LSN chkpt_end_lsn)
-{
-    (*recover_functor)(recover_functor_arg, scanner, chkpt_start_lsn, chkpt_end_lsn);
+sm_log_recover_mgr::recover() {
+  if(!sm_log::need_recovery && !config::is_backup_srv()) {
+    LOG(INFO) << "No need for recovery";
+    return;
+  }
+  LSN chkpt_lsn = get_chkpt_start();
+  if(chkpt_lsn.offset()) {
+    sm_chkpt_mgr::recover(chkpt_lsn, this);
+  }
+  redo_log(chkpt_lsn, get_durable_mark());  // till end of log
+}
+
+void sm_log_recover_mgr::redo_log(LSN start_lsn, LSN end_lsn) {
+    (*recover_functor)(recover_functor_arg, scanner, start_lsn, end_lsn);
+}
+
+void sm_log_recover_mgr::redo_logbuf(LSN start, LSN end) {
+  ASSERT(logbuf_scanner);
+  (*logbuf_redo_functor)(nullptr, logbuf_scanner, start, end);
 }
 
 sm_log_recover_mgr::~sm_log_recover_mgr()
@@ -50,10 +69,12 @@ sm_log_recover_mgr::~sm_log_recover_mgr()
 }
 
 sm_log_recover_mgr::block_scanner::block_scanner(sm_log_recover_mgr *lm, LSN start,
-                                                 bool follow_overflow, bool fetch_payloads)
+                                                 bool follow_overflow, bool fetch_payloads,
+                                                 bool force_fetch_from_logbuf)
     : _lm(lm)
     , _follow_overflow(follow_overflow)
     , _fetch_payloads(fetch_payloads)
+    , _force_fetch_from_logbuf(force_fetch_from_logbuf)
     , _buf((log_block*)rcu_alloc(fetch_payloads? MAX_BLOCK_SIZE : MIN_BLOCK_FETCH))
 {
     _load_block(start, _follow_overflow);
@@ -101,11 +122,35 @@ sm_log_recover_mgr::block_scanner::_load_block(LSN x, bool follow_overflow)
             return;
     }
 
+    bool read_from_logbuf = false;
+    if(config::is_backup_srv()) {
+      read_from_logbuf = _force_fetch_from_logbuf;
+    } else {
+      read_from_logbuf = logmgr && x.offset() > logmgr->durable_flushed_lsn_offset();
+    }
+
     // helper function... pread may not read everything in one call
     auto pread = [&](size_t nbytes, uint64_t i)->size_t {
         uint64_t offset = sid->offset(x);
-        _cur_block = _buf;
-        return i+os_pread(sid->fd, ((char *)_buf)+i, nbytes-i, offset+i);
+        // See if it's stepping into the log buffer
+        if(read_from_logbuf) {
+            ALWAYS_ASSERT(config::is_backup_srv());
+            // we should be scanning and replaying the log at a backup node
+            auto* logbuf = logmgr->get_logbuf();
+            // the caller should have called advance_writer(end_lsn) already
+            if(logbuf->read_end() <= sid->buf_offset(x)) {
+                return 0;
+            }
+            nbytes = std::min(nbytes, logbuf->read_end() - sid->buf_offset(x));
+            ALWAYS_ASSERT(nbytes);
+            _cur_block = (log_block *)logbuf->read_buf(sid->buf_offset(x), nbytes);
+            return nbytes;
+        } else {
+            // otherwise we're recovering from disk, assuming the possibly NVRAM
+            // backed logbuf is already flushed, ie durable_flushed_lsn == durable_lsn.
+            _cur_block = _buf;
+            return i+os_pread(sid->fd, ((char *)_buf)+i, nbytes-i, offset+i);
+        }
     };
         
     /* Fetch log header */
@@ -114,7 +159,9 @@ sm_log_recover_mgr::block_scanner::_load_block(LSN x, bool follow_overflow)
 
     if (n < MIN_BLOCK_FETCH) {
         /* Not necessarily a problem: we could be at the end of a
-           segment and most log records are smaller than max size
+           segment and most log records are smaller than max size,
+           or we could be reading from the NVRAM-backed log buffer
+           (ie replaying a shipped log buffer) and hit the end (n == 0).
          */
         if (n < MIN_LOG_BLOCK_SIZE)
             return; // truncate!
@@ -145,7 +192,7 @@ sm_log_recover_mgr::block_scanner::_load_block(LSN x, bool follow_overflow)
         }
     }
 
-    if (_fetch_payloads) {
+    if (!read_from_logbuf && _fetch_payloads) {
         uint64_t bsize = (char *)_cur_block->payload_end() - (char *)_cur_block;
         if (bsize > MAX_BLOCK_SIZE)
             return; // corrupt ==> truncate
@@ -160,8 +207,11 @@ sm_log_recover_mgr::block_scanner::_load_block(LSN x, bool follow_overflow)
     success = true;
 }
 
-sm_log_recover_mgr::log_scanner::log_scanner(sm_log_recover_mgr *lm, LSN start, bool fetch_payloads)
-    : _bscan(lm, start, true, fetch_payloads)
+sm_log_recover_mgr::log_scanner::log_scanner(sm_log_recover_mgr *lm,
+                                             LSN start,
+                                             bool fetch_payloads,
+                                             bool force_fetch_from_logbuf)
+    : _bscan(lm, start, true, fetch_payloads, force_fetch_from_logbuf)
     , _i(0)
     , has_payloads(fetch_payloads)
 {
@@ -196,6 +246,41 @@ sm_log_recover_mgr::log_scanner::_find_record()
 }
 
 void
+sm_log_recover_mgr::load_object_from_logbuf(char *buf, size_t bufsz, fat_ptr ptr, int align_bits)
+{
+    THROW_IF(ptr.asi_type() != fat_ptr::ASI_LOG,
+             illegal_argument, "Source object not stored in the log");
+    size_t nbytes = decode_size_aligned(ptr.size_code(), align_bits);
+    THROW_IF(bufsz < nbytes, illegal_argument,
+             "Source object too large for buffer (%zd needed, %zd available)",
+             nbytes, bufsz);
+
+    auto segnum = ptr.log_segment();
+    ASSERT(segnum >= 0);
+
+    auto *sid = get_segment(segnum);
+    ASSERT(sid);
+    ASSERT(ptr.offset() >= sid->start_offset);
+
+    ALWAYS_ASSERT(config::is_backup_srv());
+    auto* logbuf = logmgr->get_logbuf();
+    size_t read_end = logbuf->read_end();
+    size_t read_begin = logbuf->read_begin();
+    uint64_t offset = sid->buf_offset(LSN::from_ptr(ptr));
+    if(read_begin <= offset && read_end > offset + nbytes) {
+      memcpy(buf, logbuf->_get_ptr(offset), nbytes);
+      // Verify to make sure we didn't read garbage
+      read_end = logbuf->read_end();
+      read_begin = logbuf->read_begin();
+      if(read_begin <= offset && read_end > offset + nbytes) {
+        return;
+      }
+    }
+    while(ptr.offset() >= logmgr->durable_flushed_lsn().offset()) {}
+    load_object(buf, bufsz, ptr, align_bits);
+}
+
+void
 sm_log_recover_mgr::load_object(char *buf, size_t bufsz, fat_ptr ptr, int align_bits)
 {
     THROW_IF(ptr.asi_type() != fat_ptr::ASI_LOG,
@@ -211,7 +296,13 @@ sm_log_recover_mgr::load_object(char *buf, size_t bufsz, fat_ptr ptr, int align_
     auto *sid = get_segment(segnum);
     ASSERT(sid);
     ASSERT(ptr.offset() >= sid->start_offset);
+
+    if (config::nvram_log_buffer && ptr.offset() > logmgr->durable_flushed_lsn().offset()) {
+      return load_object_from_logbuf(buf, bufsz, ptr, align_bits);
+    }
+
     size_t m = os_pread(sid->fd, buf, nbytes, ptr.offset() - sid->start_offset);
+    ALWAYS_ASSERT(m == nbytes);
     THROW_IF(m != nbytes, log_file_error,
              "Unable to read full object (%zd bytes needed, %zd read)",
              nbytes, m);
@@ -297,15 +388,16 @@ get_type(log_record_type tp)
     case LOG_UPDATE:
     case LOG_UPDATE_EXT:
         return sm_log_scan_mgr::LOG_UPDATE;
+    case LOG_UPDATE_KEY:
+        return sm_log_scan_mgr::LOG_UPDATE_KEY;
 
     case LOG_DELETE:
         return sm_log_scan_mgr::LOG_DELETE;
+    case LOG_ENHANCED_DELETE:
+        return sm_log_scan_mgr::LOG_ENHANCED_DELETE;
 
     case LOG_RELOCATE:
         return sm_log_scan_mgr::LOG_RELOCATE;
-
-    case LOG_CHKPT:
-        return sm_log_scan_mgr::LOG_CHKPT;
 
     case LOG_FID:
         return sm_log_scan_mgr::LOG_FID;
@@ -483,13 +575,17 @@ sm_log_scan_mgr_impl::sm_log_scan_mgr_impl(sm_log_recover_mgr *lm)
 {
 }
 
-sm_log_header_scan_impl::sm_log_header_scan_impl(sm_log_recover_mgr *lm, LSN start)
-    : scan(lm, start, false)
+sm_log_header_scan_impl::sm_log_header_scan_impl(sm_log_recover_mgr *lm, LSN start,
+                                                 bool force_fetch_from_logbuf)
+    : scan(lm, start, false, force_fetch_from_logbuf)
     , lm(lm)
 {
 }
-sm_log_record_scan_impl::sm_log_record_scan_impl(sm_log_recover_mgr *lm, LSN start, bool just_one_tx, bool fetch_payloads)
-    : scan(lm, start, fetch_payloads)
+sm_log_record_scan_impl::sm_log_record_scan_impl(sm_log_recover_mgr *lm,
+                                                 LSN start, bool just_one_tx,
+                                                 bool fetch_payloads,
+                                                 bool force_fetch_from_logbuf)
+    : scan(lm, start, fetch_payloads, force_fetch_from_logbuf)
     , lm(lm)
     , start_lsn(start)
     , just_one(just_one_tx)
@@ -497,25 +593,27 @@ sm_log_record_scan_impl::sm_log_record_scan_impl(sm_log_recover_mgr *lm, LSN sta
 }
 
 sm_log_scan_mgr::header_scan *
-sm_log_scan_mgr::new_header_scan(LSN start)
+sm_log_scan_mgr::new_header_scan(LSN start, bool force_fetch_from_logbuf)
 {
     auto *self = get_impl(this);
-    return (sm_log_header_scan_impl*) make_new(self->lm, start);
+    return (sm_log_header_scan_impl*) make_new(self->lm, start, force_fetch_from_logbuf);
 }
 
 
 sm_log_scan_mgr::record_scan *
-sm_log_scan_mgr::new_log_scan(LSN start, bool fetch_payloads)
+sm_log_scan_mgr::new_log_scan(LSN start, bool fetch_payloads, bool force_fetch_from_logbuf)
 {
     auto *self = get_impl(this);
-    return (sm_log_record_scan_impl*) make_new(self->lm, start, false, fetch_payloads);
+    return (sm_log_record_scan_impl*) make_new(self->lm, start, false,
+                                               fetch_payloads, force_fetch_from_logbuf);
 }
 
 sm_log_scan_mgr::record_scan *
-sm_log_scan_mgr::new_tx_scan(LSN start)
+sm_log_scan_mgr::new_tx_scan(LSN start, bool force_fetch_from_logbuf)
 {
     auto *self = get_impl(this);
-    return (sm_log_record_scan_impl*) make_new(self->lm, start, true, true);
+    return (sm_log_record_scan_impl*) make_new(self->lm, start, true, true,
+                                               force_fetch_from_logbuf);
 }
 
 void

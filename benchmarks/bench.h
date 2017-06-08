@@ -7,8 +7,12 @@
 #include <utility>
 #include <string>
 
-#include "abstract_db.h"
+#include <gflags/gflags.h>
+
+#include "ndb_wrapper.h"
+#include "ordered_index.h"
 #include "../macros.h"
+#include "../txn.h"
 #include "../util.h"
 #include "../spinbarrier.h"
 #include "../dbcore/sm-config.h"
@@ -28,9 +32,9 @@
 #include <vector>
 #include <set>
 
-extern void ycsb_do_test(abstract_db *db, int argc, char **argv);
-extern void tpcc_do_test(abstract_db *db, int argc, char **argv);
-extern void tpce_do_test(abstract_db *db, int argc, char **argv);
+extern void ycsb_do_test(ndb_wrapper *db, int argc, char **argv);
+extern void tpcc_do_test(ndb_wrapper *db, int argc, char **argv);
+extern void tpce_do_test(ndb_wrapper *db, int argc, char **argv);
 
 enum {
   RUNMODE_TIME = 0,
@@ -39,17 +43,6 @@ enum {
 
 // benchmark global variables
 extern volatile bool running;
-extern int verbose;
-extern uint64_t txn_flags;
-extern double scale_factor;
-extern uint64_t runtime;
-extern uint64_t ops_per_worker;
-extern int run_mode;
-extern int enable_parallel_loading;
-extern int slow_exit;
-extern int retry_aborted_transaction;
-extern int backoff_aborted_transaction;
-extern int enable_chkpt;
 
 template <typename T> static std::vector<T>
 unique_filter(const std::vector<T> &v)
@@ -66,14 +59,13 @@ unique_filter(const std::vector<T> &v)
 
 class bench_loader : public thread::sm_runner {
 public:
-  bench_loader(unsigned long seed, abstract_db *db,
-               const std::map<std::string, abstract_ordered_index *> &open_tables)
+  bench_loader(unsigned long seed, ndb_wrapper *db,
+               const std::map<std::string, OrderedIndex*> &open_tables)
     : sm_runner(), r(seed), db(db), open_tables(open_tables)
   {
-    txn_obj_buf.reserve(str_arena::MinStrReserveLength);
-    txn_obj_buf.resize(db->sizeof_txn_object(txn_flags));
     // don't try_instantiate() here; do it when we start to load. The way we reuse
     // threads relies on this fact (see bench_runner::run()).
+    txn_obj_buf = (transaction*)malloc(sizeof(transaction));
   }
 
   virtual ~bench_loader() {}
@@ -90,14 +82,13 @@ private:
   }
 
 protected:
-  inline void *txn_buf() { return (void *) txn_obj_buf.data(); }
-
+  inline transaction *txn_buf() { return txn_obj_buf; }
   virtual void load() = 0;
 
   util::fast_random r;
-  abstract_db *const db;
-  std::map<std::string, abstract_ordered_index *> open_tables;
-  std::string txn_obj_buf;
+  ndb_wrapper *const db;
+  std::map<std::string, OrderedIndex*> open_tables;
+  transaction* txn_obj_buf;
   str_arena arena;
 };
 
@@ -109,8 +100,8 @@ class bench_worker : public thread::sm_runner {
 public:
 
   bench_worker(unsigned int worker_id,
-               unsigned long seed, abstract_db *db,
-               const std::map<std::string, abstract_ordered_index *> &open_tables,
+               unsigned long seed, ndb_wrapper *db,
+               const std::map<std::string, OrderedIndex*> &open_tables,
                spin_barrier *barrier_a, spin_barrier *barrier_b)
     : sm_runner(),
       worker_id(worker_id),
@@ -129,8 +120,7 @@ public:
       ntxn_phantom_aborts(0),
       ntxn_query_commits(0)
   {
-    txn_obj_buf.reserve(str_arena::MinStrReserveLength);
-    txn_obj_buf.resize(db->sizeof_txn_object(txn_flags));
+    txn_obj_buf = (transaction*)malloc(sizeof(transaction));
     try_impersonate();
   }
 
@@ -178,8 +168,8 @@ public:
 
   const tx_stat_map get_txn_counts() const;
 
-  typedef abstract_db::counter_map counter_map;
-  typedef abstract_db::txn_counter_map txn_counter_map;
+  typedef ndb_wrapper::counter_map counter_map;
+  typedef ndb_wrapper::txn_counter_map txn_counter_map;
 
 #ifdef ENABLE_BENCH_TXN_COUNTERS
   inline txn_counter_map
@@ -193,13 +183,12 @@ private:
   virtual void my_work(char *);
 
 protected:
-
-  inline void *txn_buf() { return (void *) txn_obj_buf.data(); }
+  inline transaction *txn_buf() { return txn_obj_buf; }
 
   unsigned int worker_id;
   util::fast_random r;
-  abstract_db *const db;
-  std::map<std::string, abstract_ordered_index *> open_tables;
+  ndb_wrapper *const db;
+  std::map<std::string, OrderedIndex*> open_tables;
   spin_barrier *const barrier_a;
   spin_barrier *const barrier_b;
 
@@ -229,7 +218,7 @@ protected:
 
   std::vector<tx_stat> txn_counts; // commits and aborts breakdown
 
-  std::string txn_obj_buf;
+  transaction* txn_obj_buf;
   str_arena arena;
 };
 
@@ -239,12 +228,13 @@ public:
   bench_runner(bench_runner &&) = delete;
   bench_runner &operator=(const bench_runner &) = delete;
 
-  bench_runner(abstract_db *db)
-    : db(db), barrier_a(config::worker_threads), barrier_b(1) {}
+  bench_runner(ndb_wrapper *db)
+    : db(db), barrier_a(config::worker_threads), barrier_b(config::worker_threads > 0 ? 1 : 0) {}
   virtual ~bench_runner() {}
   virtual void prepare(char *) = 0;
   void run();
   void create_files_task(char *);
+  void start_measurement();
 
   static std::vector<bench_worker*> workers;
 
@@ -255,8 +245,8 @@ protected:
   // only called once
   virtual std::vector<bench_worker*> make_workers() = 0;
 
-  abstract_db *const db;
-  std::map<std::string, abstract_ordered_index *> open_tables;
+  ndb_wrapper *const db;
+  std::map<std::string, OrderedIndex*> open_tables;
 
   // barriers for actual benchmark execution
   spin_barrier barrier_a;
@@ -265,7 +255,7 @@ protected:
 
 // XXX(stephentu): limit_callback is not optimal, should use
 // static_limit_callback if possible
-class limit_callback : public abstract_ordered_index::scan_callback {
+class limit_callback : public OrderedIndex::scan_callback {
 public:
   limit_callback(ssize_t limit = -1)
     : limit(limit), n(0)
@@ -288,82 +278,6 @@ public:
   const ssize_t limit;
 private:
   size_t n;
-};
-
-
-class latest_key_callback : public abstract_ordered_index::scan_callback {
-public:
-  latest_key_callback(varstr &k, ssize_t limit = -1)
-    : limit(limit), n(0), k(&k)
-  {
-    ALWAYS_ASSERT(limit == -1 || limit > 0);
-  }
-
-  virtual bool invoke(
-      const char *keyp, size_t keylen,
-      const varstr &value)
-  {
-    ASSERT(limit == -1 || n < size_t(limit));
-    k->copy_from(keyp, keylen);
-    ++n;
-    return (limit == -1) || (n < size_t(limit));
-  }
-
-  inline size_t size() const { return n; }
-  inline varstr &kstr() { return *k; }
-
-private:
-  ssize_t limit;
-  size_t n;
-  varstr *k;
-};
-
-// explicitly copies keys, because btree::search_range_call() interally
-// re-uses a single string to pass keys (so using standard string assignment
-// will force a re-allocation b/c of shared ref-counting)
-//
-// this isn't done for values, because each value has a distinct string from
-// the string allocator, so there are no mutations while holding > 1 ref-count
-template <size_t N>
-class static_limit_callback : public abstract_ordered_index::scan_callback {
-public:
-  // XXX: push ignore_key into lower layer
-  static_limit_callback(str_arena *arena, bool ignore_key)
-    : n(0), arena(arena), ignore_key(ignore_key)
-  {
-    static_assert(N > 0, "xx");
-  }
-
-  virtual bool invoke(
-      const char *keyp, size_t keylen,
-      const varstr &value)
-  {
-    ASSERT(n < N);
-    ASSERT(arena->manages(&value));
-    if (ignore_key) {
-      values.emplace_back(nullptr, &value);
-    } else {
-      varstr * const s_px = arena->next(keylen);
-      ASSERT(s_px);
-      s_px->copy_from(keyp, keylen);
-      values.emplace_back(s_px, &value);
-    }
-    return ++n < N;
-  }
-
-  inline size_t
-  size() const
-  {
-    return values.size();
-  }
-
-  typedef std::pair<const varstr *, const varstr *> kv_pair;
-  typename util::vec<kv_pair, N>::type values;
-
-private:
-  size_t n;
-  str_arena *arena;
-  bool ignore_key;
 };
 
 // Note: try_catch_cond_abort might call __abort_txn with rc=RC_FALSE

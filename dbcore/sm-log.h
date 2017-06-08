@@ -58,6 +58,7 @@ struct sm_tx_log {
        assumed to already have been allocated.
      */
     void log_update(FID f, OID o, fat_ptr p, int abits, fat_ptr *pdest);
+    void log_update_key(FID f, OID o, fat_ptr p, int abits);
 
     /* Record a change in a record's on-disk location, to the address
        indicated. The OID remains the same and the data for the new
@@ -70,10 +71,11 @@ struct sm_tx_log {
        the OID deallocated.
     */
     void log_delete(FID f, OID o);
+    void log_enhanced_delete(FID f, OID o, fat_ptr p, int abits);
 
-    /* Record the creation of a table with FID and name
+    /* Record the creation of a index with tuple/key FIDs and name
      */
-    void log_fid(FID f, const std::string &name);
+    void log_index(FID tuple_fid, FID key_fid, const std::string &name);
 
     /* Return this transaction's commit LSN, or INVALID_LSN if the
        transaction has not entered pre-commit yet.
@@ -137,8 +139,8 @@ protected:
 struct sm_log_scan_mgr {
     static size_t const NO_PAYLOAD = -1;
     
-    enum record_type { LOG_INSERT, LOG_INSERT_INDEX, LOG_UPDATE,
-                       LOG_RELOCATE, LOG_DELETE, LOG_CHKPT, LOG_FID };
+    enum record_type { LOG_INSERT, LOG_INSERT_INDEX, LOG_UPDATE, LOG_RELOCATE,
+                       LOG_DELETE, LOG_ENHANCED_DELETE, LOG_UPDATE_KEY, LOG_FID };
 
     /* A cursor for iterating over log records, whether those of a single
        transaction or all which follow some arbitrary starting point.
@@ -268,18 +270,18 @@ struct sm_log_scan_mgr {
        end-of-log. Record payloads are not available, and must be
        loaded manually if desired.
      */
-    header_scan *new_header_scan(LSN start);
+    header_scan *new_header_scan(LSN start, bool force_fetch_from_logbuf);
     
     /* Start scanning the log from [start], stopping only when
        end-of-log is encountered. Record payloads are available.
      */
-    record_scan *new_log_scan(LSN start, bool fetch_payloads);
+    record_scan *new_log_scan(LSN start, bool fetch_payloads, bool force_fetch_from_logbuf);
 
     /* Start scanning log entries for the transaction whose commit
        record resides at [start]. Stop when all records for the
        transaction have been visited. Record payloads are available.
      */
-    record_scan *new_tx_scan(LSN start);
+    record_scan *new_tx_scan(LSN start, bool force_fetch_from_logbuf);
 
     /* Load the object referenced by [ptr] from the log. The pointer
        must reference the log (ASI_LOG) and the given buffer must be large
@@ -311,6 +313,9 @@ typedef void sm_log_recover_function(void *arg, sm_log_scan_mgr *scanner,
 struct sm_log {
     static bool need_recovery;
 
+    // RDMA needs the space to be allocated before we create the logmgr
+    static window_buffer* logbuf;
+
     void update_chkpt_mark(LSN cstart, LSN cend);
     LSN flush();
     void set_tls_lsn_offset(uint64_t offset);
@@ -322,6 +327,9 @@ struct sm_log {
      */
     static
     sm_log *new_log(sm_log_recover_impl *recover_functor, void *rarg);
+
+    static
+    void allocate_log_buffer();
 
     /* Return a pointer to the log's scan manager.
 
@@ -360,7 +368,10 @@ struct sm_log {
        must reference the log (ASI_LOG) and the given buffer must be large
        enough to hold the object.
      */
-    void load_object(char *buf, size_t bufsz, fat_ptr ptr, size_t align_bits=DEFAULT_ALIGNMENT_BITS);
+    void load_object(char *buf, size_t bufsz, fat_ptr ptr,
+                     size_t align_bits=DEFAULT_ALIGNMENT_BITS);
+    void load_object_from_logbuf(char *buf, size_t bufsz, fat_ptr ptr,
+                                 size_t align_bits=DEFAULT_ALIGNMENT_BITS);
 
     /* Retrieve the address of an externalized log record payload.
 
@@ -368,12 +379,18 @@ struct sm_log {
      */
     fat_ptr load_ext_pointer(fat_ptr ptr);
 
-    window_buffer &get_logbuf();
+    segment_id* get_offset_segment(uint64_t off);
+    LSN get_chkpt_start();
+    static window_buffer *get_logbuf();
     segment_id *assign_segment(uint64_t lsn_begin, uint64_t lsn_end);
-    uint64_t persist_log_buffer();
-    segment_id *flush_log_buffer(window_buffer &logbuf, uint64_t new_dlsn_offset, bool update_dmark);
+    void BackupFlushLog(uint64_t new_dlsn_offset);
+    segment_id* get_segment(uint32_t segnum);
     void redo_log(LSN start_lsn, LSN end_lsn);
+    void redo_logbuf(LSN start_lsn, LSN end_lsn);
+    void recover();
     void enqueue_committed_xct(uint32_t worker_id, uint64_t start_time);
+    void create_segment_file(segment_id *sid);
+    uint64_t durable_flushed_lsn_offset();
 
     virtual ~sm_log() { }
 

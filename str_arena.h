@@ -1,15 +1,9 @@
 #pragma once
 
 #include <memory>
-#include "small_vector.h"
 #include "varstr.h"
 #include "dbcore/sm-common.h"
 
-#ifdef USE_DYNARRAY_STR_ARENA
-#include "str_arena-dynarray.h"
-#else
-
-// XXX: str arena hardcoded now to handle at most 1024 strings
 class str_arena {
 public:
 
@@ -97,5 +91,3 @@ public:
 private:
   str_arena *arena;
 };
-
-#endif

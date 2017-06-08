@@ -11,8 +11,6 @@ __thread uint32_t thread_id;
 __thread bool thread_initialized;
 
 void sm_thread::idle_task() {
-  ALWAYS_ASSERT(!numa_run_on_node(node));
-  ALWAYS_ASSERT(!sched_yield());
   std::unique_lock<std::mutex> lock(trigger_lock);
 
 #if defined(SSN) || defined(SSI)
@@ -27,7 +25,7 @@ void sm_thread::idle_task() {
   while (not volatile_read(shutdown)) {
     if (volatile_read(state) == kStateHasWork) {
       task(task_input);
-      if (logmgr) {
+      if (!config::IsShutdown() && logmgr and not config::is_backup_srv()) {
         // logmgr might be null during recovery and backups will flush on their own
         auto my_offset = logmgr->get_tls_lsn_offset();
         // Must use a while loop here instead of using logmgr->wait_for_durable();
@@ -44,7 +42,7 @@ void sm_thread::idle_task() {
       COMPILER_MEMORY_FENCE;
       volatile_write(state, kStateNoWork);
     }
-    if (__sync_bool_compare_and_swap(&state, kStateNoWork, kStateSleep)) {
+    if(sleep_when_idle && __sync_bool_compare_and_swap(&state, kStateNoWork, kStateSleep)) {
       // FIXME(tzwang): add a work queue so we can
       // continue if there is more work to do
       trigger.wait(lock);

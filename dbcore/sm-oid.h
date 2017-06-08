@@ -27,8 +27,8 @@ static size_t const SZCODE_ALIGN_BITS = dynarray::page_bits();
  */
 struct oid_array {
     static size_t const MAX_SIZE = sizeof(fat_ptr) << 32;
-    static OID const MAX_ENTRIES = (size_t(1) << 32) - sizeof(dynarray)/sizeof(fat_ptr);
-    static size_t const ENTRIES_PER_PAGE = sizeof(fat_ptr) << SZCODE_ALIGN_BITS;
+    static uint64_t const MAX_ENTRIES = (size_t(1) << 32) - sizeof(dynarray)/sizeof(fat_ptr);
+    static size_t const ENTRIES_PER_PAGE = (sizeof(fat_ptr) << SZCODE_ALIGN_BITS) / 2;
     
     /* How much space is required for an array with [n] entries?
      */
@@ -39,12 +39,11 @@ struct oid_array {
         return OFFSETOF(oid_array, _entries[n]);
     }
     
-    static
-    fat_ptr make();
+    static fat_ptr make();
 
     static
     dynarray make_oid_dynarray() {
-        return dynarray(oid_array::alloc_size(), 1024*1024*128);
+        return dynarray(oid_array::alloc_size(), 128 * config::MB);
     }
 
     static
@@ -59,7 +58,9 @@ struct oid_array {
 
     /* Return the number of entries this OID array currently holds.
      */
-    size_t nentries();
+    inline size_t nentries() {
+      return _backing_store.size() / sizeof(fat_ptr);
+    }
 
     /* Make sure the backing store holds at least [n] entries.
      */
@@ -88,8 +89,7 @@ struct sm_oid_mgr {
      */
     static FID const METADATA_FID = 2;
 
-    /* Create a new OID manager, recovering its state from
-       [chkpt_tx_scan].
+    /* Create a new OID manager.
        
        NOTE: the scan must be positioned at the first record of the
        checkpoint transaction (or the location where the record would
@@ -112,14 +112,14 @@ struct sm_oid_mgr {
        amount of data to ship for replication (no need to ship chkpts,
        the backup can have its own chkpts).
      */
-    static void create(LSN chkpt_start, sm_log_recover_mgr *lm);
+    static void create();
 
     /* Record a snapshot of the OID manager's state as part of a
        checkpoint. The data will be durable by the time this function
        returns, but will only be reachable if the checkpoint
        transaction commits and its location is properly recorded.
      */
-    void take_chkpt(LSN cstart);
+    void PrimaryTakeChkpt(uint64_t chkpt_start_lsn);
 
     /* Create a new file and return its FID. If [needs_alloc]=true,
        the new file will be managed by an allocator and its FID can be
@@ -167,33 +167,34 @@ struct sm_oid_mgr {
     fat_ptr oid_get(FID f, OID o);
     fat_ptr *oid_get_ptr(FID f, OID o);
 
-    fat_ptr oid_get(oid_array *oa, OID o);
-    fat_ptr *oid_get_ptr(oid_array *oa, OID o);
-
     /* Update the contents of the specified OID. The fat_ptr may
        reference memory or disk (or be NULL).
      */
     void oid_put(FID f, OID o, fat_ptr p);
-    void oid_put(oid_array *oa, OID o, fat_ptr p);
-
     void oid_put_new(FID f, OID o, fat_ptr p);
-    void oid_put_new(oid_array *oa, OID o, fat_ptr p);
+    void oid_put_new_if_absent(FID f, OID o, fat_ptr p);
 
     /* Return a fat_ptr to the overwritten object (could be an in-flight version!) */
-    fat_ptr oid_put_update(
+    fat_ptr PrimaryTupleUpdate(
       FID f, OID o, const varstr* value, xid_context *updater_xc, fat_ptr *new_obj_ptr);
-    fat_ptr oid_put_update(
+    fat_ptr PrimaryTupleUpdate(
       oid_array *oa, OID o, const varstr *value, xid_context *updater_xc, fat_ptr *new_obj_ptr);
 
     dbtuple *oid_get_latest_version(FID f, OID o);
-    dbtuple *oid_get_latest_version(oid_array *oa, OID o);
 
     dbtuple *oid_get_version(FID f, OID o, xid_context *visitor_xc);
     dbtuple *oid_get_version(oid_array *oa, OID o, xid_context *visitor_xc);
 
-    fat_ptr *ensure_tuple(FID f, OID o, epoch_num e);
-    fat_ptr *ensure_tuple(oid_array *oa, OID o, epoch_num e);
-    fat_ptr ensure_tuple(fat_ptr *ptr, epoch_num e);
+    /* Return the latest visible version, for backups only. Check first the pedest
+     * array and install new Objects on the tuple array if needed.
+     */
+    dbtuple* BackupGetVersion(oid_array* ta, oid_array* pa, OID o, xid_context* xc);
+
+    /* Helper function for oid_get_version to test visibility. Returns true if the
+     * version ([object]) is visible to the given transaction ([xc]). Sets [retry]
+     * to true if the caller needs to retry the search from the head of the chain.
+     */
+    bool TestVisibility(Object* object, xid_context* xc, bool& retry);
 
     inline void oid_check_phantom(xid_context *visitor_xc, uint64_t vcstamp) {
       if(!config::phantom_prot) {
@@ -236,8 +237,45 @@ struct sm_oid_mgr {
 #endif  // SSI/SSN
     }
 
-    void oid_unlink(FID f, OID o, void *object_payload);
-    void oid_unlink(oid_array *oa, OID o, void *object_payload);
+    inline dbtuple* oid_get_latest_version(oid_array *oa, OID o) {
+        auto head_offset = oa->get(o)->offset();
+        if (head_offset)
+            return (dbtuple *)((Object*)head_offset)->GetPayload();
+        return NULL;
+    }
+
+    inline void PrimaryTupleUnlink(oid_array *oa, OID o) {
+        // Now the head is guaranteed to be the only dirty version
+        // because we unlink the overwritten dirty version in put,
+        // essentially this function ditches the head directly.
+        // Otherwise use the commented out old code.
+        PrimaryTupleUnlink(oa->get(o));
+    }
+    inline void PrimaryTupleUnlink(fat_ptr* ptr) {
+        Object* head_obj = (Object*)ptr->offset();
+        // using a CAS is overkill: head is guaranteed to be the (only) dirty version
+        volatile_write(ptr->_ptr, head_obj->GetNextVolatile()._ptr);
+        __sync_synchronize();
+        // tzwang: The caller is responsible for deallocate() the head version
+        // got unlinked - a update of own write will record the unlinked version
+        // in the transaction's write-set, during abortor commit the version's
+        // pvalue needs to be examined. So PrimaryTupleUnlink() shouldn't deallocate()
+        // here. Instead, the transaction does it in during commit or abort.
+    }
+
+    inline void oid_put_new(oid_array *oa, OID o, fat_ptr p) {
+        auto *entry= oa->get(o);
+        ASSERT(*entry == NULL_PTR);
+        *entry = p;
+    }
+
+    inline void oid_put(oid_array *oa, OID o, fat_ptr p) {
+        auto *ptr = oa->get(o);
+        *ptr = p;
+    }
+
+    inline fat_ptr oid_get(oid_array *oa, OID o) { return *oa->get(o); }
+    inline fat_ptr* oid_get_ptr(oid_array *oa, OID o) { return oa->get(o); }
 
     bool file_exists(FID f);
     void recreate_file(FID f);    // for recovery only

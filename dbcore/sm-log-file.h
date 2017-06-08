@@ -2,9 +2,47 @@
 #ifndef __SM_LOG_FILE_H
 #define __SM_LOG_FILE_H
 
+// start, end LSN
+#define CHKPT_FILE_NAME_FMT "chk-%016zx-%016zx"
+#define CHKPT_FILE_NAME_BUFSZ sizeof("chk-0123456789abcdef-0123456789abcdef")
+
+// LSN
+#define DURABLE_FILE_NAME_FMT "dur-%016zx"
+#define DURABLE_FILE_NAME_BUFSZ sizeof("dur-0123456789abcdef")
+
+// segment
+#define NXT_SEG_FILE_NAME_FMT "nxt-%08x"
+#define NXT_SEG_FILE_NAME_BUFSZ sizeof("nxt-01234567")
+
+// segment, start offset, end offset
+#define SEGMENT_FILE_NAME_FMT "log-%08x-%012zx-%012zx"
+#define SEGMENT_FILE_NAME_BUFSZ sizeof("log-01234567-0123456789ab-0123456789ab")
+
 #include "sm-log-defs.h"
 
 #include <deque>
+
+struct nxt_seg_file_name {
+    char buf[NXT_SEG_FILE_NAME_BUFSZ];
+    nxt_seg_file_name(uint32_t segnum) {
+        size_t n = os_snprintf(buf, sizeof(buf),
+                               NXT_SEG_FILE_NAME_FMT, segnum);
+        ASSERT(n < sizeof(buf));
+    }
+    operator char const *() { return buf; }
+    char const *operator*() { return buf; }
+};
+
+struct cmark_file_name {
+    char buf[CHKPT_FILE_NAME_BUFSZ];
+    cmark_file_name(LSN start, LSN end) {
+        size_t n = os_snprintf(buf, sizeof(buf),
+                               CHKPT_FILE_NAME_FMT, start._val, end._val);
+        ASSERT(n < sizeof(buf));
+    }
+    operator char const *() { return buf; }
+    char const *operator*() { return buf; }
+};
 
 /* The file management part of the log.
 
@@ -62,6 +100,21 @@ struct segment_id {
 
 };
 
+struct segment_file_name {
+    char buf[SEGMENT_FILE_NAME_BUFSZ];
+    segment_file_name(segment_id *sid)
+        : segment_file_name(sid->segnum, sid->start_offset, sid->end_offset)
+    {
+    }
+    segment_file_name(uint32_t segnum, uint64_t start, uint64_t end) {
+        size_t n = os_snprintf(buf, sizeof(buf),
+                               SEGMENT_FILE_NAME_FMT, segnum, start, end);
+        ASSERT(n < sizeof(buf));
+    }
+    operator char const *() { return buf; }
+    char const *operator*() { return buf; }
+};
+
 struct sm_log_file_mgr {
     /* A volatile modulo-indexed array, which forms part of the
        segment race-riddled assignment protocol.
@@ -78,6 +131,8 @@ struct sm_log_file_mgr {
     };
 
     sm_log_file_mgr();
+
+    void create_segment_file(segment_id *sid);
 
     /* Change the segment size.
 

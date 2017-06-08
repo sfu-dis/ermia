@@ -1,9 +1,6 @@
-// -*- mode:c++ -*-
-#ifndef __SM_LOG_ALLOC_H
-#define __SM_LOG_ALLOC_H
+#pragma once
 
 #include <deque>
-#include "../spinlock.h"
 #include "sm-log-recover.h"
 
 /* The log block allocator.
@@ -74,10 +71,14 @@ struct sm_log_alloc_mgr {
 
     void _log_write_daemon();
     void _kick_log_write_daemon();
-    segment_id *flush_log_buffer(window_buffer &logbuf, uint64_t new_dlsn_dlsn, bool update_dmark=false);
+    segment_id *PrimaryFlushLog(uint64_t new_dlsn_dlsn, bool update_dmark = false);
+    void BackupFlushLog(uint64_t new_dlsn_dlsn);
     uint64_t smallest_tls_lsn_offset();
+    void enqueue_committed_xct(uint32_t worker_id, uint64_t start_time);
+    void dequeue_committed_xcts(uint64_t up_to, uint64_t end_time);
+
     sm_log_recover_mgr _lm;
-    window_buffer _logbuf;
+    window_buffer* _logbuf;
     uint64_t _durable_flushed_lsn_offset;
 
     pthread_t _write_daemon_tid;
@@ -122,8 +123,30 @@ struct sm_log_alloc_mgr {
     // lsn offset (corresponds to the log allocation block in the rcu-slist scheme) to its
     // own "tls" place, and the log flusher just scans all these tls places, then flush up
     // to the **smallest** lsn it found.
+    //
+    // In case the log buffer is backed by NVRAM (ie --nvram-log-buffer == 1),
+    // the thread setting its tls_lsn_offset will clflush() then continue.
+    // So smallest_tls_lsn_offset() returns the "durable lsn" (possibly still in the
+    // log buffer). The daemon is only responsible for flushing, ie making room in the
+    // log buffer to take more transactions.
     uint64_t *_tls_lsn_offset;
     uint64_t _lsn_offset CACHE_ALIGNED;
-};
+    uint64_t _logbuf_partition_size;
 
-#endif
+    // One queue per worker thread to account latency under group commit
+    // The flusher dequeues all entries from these vectors up to flushed_durable_lsn 
+    struct commit_queue {
+        // Each entry is a std::pair<lsn_offset, start_time>
+        std::vector<std::pair<uint64_t, uint64_t> > queue;
+        mcs_lock lock;  // well hopefully this won't be a bottleneck
+        uint32_t start;
+        uint32_t end;
+        sm_log_alloc_mgr *lm;
+        commit_queue() : start(0), end(0), lm(nullptr) {
+          queue.reserve(config::group_commit_queue_length);
+        }
+        void push_back(uint64_t lsn, uint64_t start_time);
+        inline uint32_t size() { return end - start; }
+    };
+    commit_queue *_commit_queue;
+};

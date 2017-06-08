@@ -9,12 +9,32 @@ using namespace RCU;
 
 sm_log *logmgr = NULL;
 bool sm_log::need_recovery = false;
+window_buffer* sm_log::logbuf = nullptr;
 
-uint64_t
-sm_log::persist_log_buffer()
+void
+sm_log::create_segment_file(segment_id *sid) {
+  get_impl(this)->_lm._lm.create_segment_file(sid);
+}
+
+void
+sm_log::allocate_log_buffer() {
+  logbuf = new window_buffer(config::log_buffer_mb * config::MB);
+}
+
+segment_id*
+sm_log::get_offset_segment(uint64_t off) {
+  return get_impl(this)->_lm._lm.get_offset_segment(off);
+}
+
+segment_id*
+sm_log::get_segment(uint32_t segnum) {
+  return get_impl(this)->_lm._lm.get_segment(segnum);
+}
+
+LSN
+sm_log::get_chkpt_start()
 {
-    /** dummy. FIXME(tzwang) **/
-    return get_impl(this)->_lm.smallest_tls_lsn_offset();
+    return get_impl(this)->_lm._lm.get_chkpt_start();
 }
 
 void
@@ -27,6 +47,47 @@ uint64_t
 sm_log::get_tls_lsn_offset()
 {
     return get_impl(this)->_lm.get_tls_lsn_offset();
+}
+
+window_buffer*
+sm_log::get_logbuf()
+{
+    return sm_log::logbuf;
+}
+
+void
+sm_log::redo_log(LSN start_lsn, LSN end_lsn)
+{
+    get_impl(this)->_lm._lm.redo_log(start_lsn, end_lsn);
+}
+
+void
+sm_log::redo_logbuf(LSN start_lsn, LSN end_lsn)
+{
+    get_impl(this)->_lm._lm.redo_logbuf(start_lsn, end_lsn);
+}
+
+void
+sm_log::recover()
+{
+    get_impl(this)->_lm._lm.recover();
+}
+
+segment_id*
+sm_log::assign_segment(uint64_t lsn_begin, uint64_t lsn_end)
+{
+    auto rval = get_impl(this)->_lm._lm.assign_segment(lsn_begin, lsn_end);
+    ALWAYS_ASSERT(rval.full_size);
+    return rval.sid;
+}
+
+void sm_log::BackupFlushLog(uint64_t new_dlsn_offset) {
+  return get_impl(this)->_lm.BackupFlushLog(new_dlsn_offset);
+}
+
+void sm_log::enqueue_committed_xct(uint32_t worker_id, uint64_t start_time)
+{
+    get_impl(this)->_lm.enqueue_committed_xct(worker_id, start_time);
 }
 
 LSN
@@ -45,6 +106,12 @@ void
 sm_log::load_object(char *buf, size_t bufsz, fat_ptr ptr, size_t align_bits)
 {
     get_impl(this)->_lm._lm.load_object(buf, bufsz, ptr, align_bits);
+}
+
+void
+sm_log::load_object_from_logbuf(char *buf, size_t bufsz, fat_ptr ptr, size_t align_bits)
+{
+    get_impl(this)->_lm._lm.load_object_from_logbuf(buf, bufsz, ptr, align_bits);
 }
 
 fat_ptr
@@ -129,8 +196,26 @@ sm_log::durable_flushed_lsn()
     auto *log = &get_impl(this)->_lm;
     auto offset = log->dur_flushed_lsn_offset();
     auto *sid = log->_lm.get_offset_segment(offset);
+    ASSERT(!sid || sid->start_offset <= offset);
+
+    if(!sid) {
+    retry:
+      sid = log->_lm._newest_segment();
+      ASSERT(sid);
+      if(offset < sid->start_offset) {
+        offset = sid->start_offset;
+      } else if(sid->end_offset <= offset) {
+        goto retry;
+      }
+    }
     ASSERT(sid);
+    ASSERT(sid->start_offset <= offset);
     return sid->make_lsn(offset);
+}
+
+uint64_t
+sm_log::durable_flushed_lsn_offset() {
+  return get_impl(this)->_lm.dur_flushed_lsn_offset();
 }
 
 void

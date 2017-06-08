@@ -122,6 +122,11 @@ enum log_record_type : uint8_t {
     /* Delete a record. No payload */
     LOG_DELETE = 0x4,
 
+    /* "Enhanced" delete record that contains a pointer to the overwritten
+     * version. Has "payload", essentially an update
+     */
+    LOG_ENHANCED_DELETE = LOG_DELETE | LOG_FLAG_HAS_PAYLOAD,
+
     /* Record the relocation of a record's contents to somewhere other
        than the log. The data must be persistent before logging the
        change (no further checks or delays will be made). Used by
@@ -146,9 +151,9 @@ enum log_record_type : uint8_t {
      */
     LOG_FAT_SKIP = LOG_SKIP | LOG_FLAG_HAS_PAYLOAD, 
 
-    /* A chkpt record
+    /* A key for an update.
      */
-    LOG_CHKPT = LOG_FLAG_HAS_PAYLOAD | 0x8,
+    LOG_UPDATE_KEY = LOG_FLAG_HAS_PAYLOAD | 0x8,
 
     /* Records the creation of an FID with a given table name
      */

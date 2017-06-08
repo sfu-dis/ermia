@@ -9,22 +9,6 @@
 
 using namespace RCU;
 
-// segment, start offset, end offset
-#define SEGMENT_FILE_NAME_FMT "log-%08x-%012zx-%012zx"
-#define SEGMENT_FILE_NAME_BUFSZ sizeof("log-01234567-0123456789ab-0123456789ab")
-
-// start, end LSN
-#define CHKPT_FILE_NAME_FMT "chk-%016zx-%016zx"
-#define CHKPT_FILE_NAME_BUFSZ sizeof("chk-0123456789abcdef-0123456789abcdef")
-
-// LSN
-#define DURABLE_FILE_NAME_FMT "dur-%016zx"
-#define DURABLE_FILE_NAME_BUFSZ sizeof("dur-0123456789abcdef")
-
-// segment
-#define NXT_SEG_FILE_NAME_FMT "nxt-%08x"
-#define NXT_SEG_FILE_NAME_BUFSZ sizeof("nxt-01234567")
-
 #warning Crash durability is NOT fully guaranteed by this implementation
 /* ^^^
 
@@ -80,32 +64,6 @@ using namespace RCU;
 */
 static size_t const LOG_SEGMENT_ALIGN = 1024;
 
-struct segment_file_name {
-    char buf[SEGMENT_FILE_NAME_BUFSZ];
-    segment_file_name(segment_id *sid)
-        : segment_file_name(sid->segnum, sid->start_offset, sid->end_offset)
-    {
-    }
-    segment_file_name(uint32_t segnum, uint64_t start, uint64_t end) {
-        size_t n = os_snprintf(buf, sizeof(buf),
-                               SEGMENT_FILE_NAME_FMT, segnum, start, end);
-        ASSERT(n < sizeof(buf));
-    }
-    operator char const *() { return buf; }
-    char const *operator*() { return buf; }
-};
-
-struct cmark_file_name {
-    char buf[CHKPT_FILE_NAME_BUFSZ];
-    cmark_file_name(LSN start, LSN end) {
-        size_t n = os_snprintf(buf, sizeof(buf),
-                               CHKPT_FILE_NAME_FMT, start._val, end._val);
-        ASSERT(n < sizeof(buf));
-    }
-    operator char const *() { return buf; }
-    char const *operator*() { return buf; }
-};
-
 struct dmark_file_name {
     char buf[CHKPT_FILE_NAME_BUFSZ];
     dmark_file_name(LSN start) {
@@ -117,17 +75,18 @@ struct dmark_file_name {
     char const *operator*() { return buf; }
 };
 
-struct nxt_seg_file_name {
-    char buf[NXT_SEG_FILE_NAME_BUFSZ];
-    nxt_seg_file_name(uint32_t segnum) {
-        size_t n = os_snprintf(buf, sizeof(buf),
-                               NXT_SEG_FILE_NAME_FMT, segnum);
-        ASSERT(n < sizeof(buf));
-    }
-    operator char const *() { return buf; }
-    char const *operator*() { return buf; }
-};
+void
+sm_log_file_mgr::create_segment_file(segment_id *sid) {
+  ALWAYS_ASSERT(config::is_backup_srv());
+  nxt_seg_file_name oldname(sid->segnum);
+  segment_file_name newname(sid);
+  os_renameat(dfd, oldname, dfd, newname);
+  os_fsync(dfd);
 
+  nxt_seg_file_name sname(sid->segnum + 1);
+  uint64_t fd = os_openat(dfd, sname, O_CREAT|O_EXCL|O_RDONLY);
+  nxt_segment_fd = (fd << 32) | (sid->segnum + 1);
+}
 
 segment_id *
 sm_log_file_mgr::_oldest_segment() {
@@ -496,9 +455,13 @@ sm_log_file_mgr::_create_nxt_seg_file(bool force)
         segment_id *sid = _newest_segment();
         if (uint32_t(nxt_segment_fd) == sid->segnum) {
             ASSERT(segnum == sid->segnum+1);
-            ASSERT(not segments[sid->segnum]);
             segments[sid->segnum] = sid;
-            
+
+            // The backup will create the real file after it got the
+            // correct begin_offset value.
+            if(config::is_backup_srv()) {
+              return;
+            }
             nxt_seg_file_name oldname(sid->segnum);
             segment_file_name newname(sid);
             os_renameat(dfd, oldname, dfd, newname);
@@ -507,6 +470,7 @@ sm_log_file_mgr::_create_nxt_seg_file(bool force)
         }
     }
     if (doit) {
+        ALWAYS_ASSERT(!config::is_backup_srv());
         nxt_seg_file_name sname(segnum);
         uint64_t fd = os_openat(dfd, sname, O_CREAT|O_EXCL|O_RDONLY);
         nxt_segment_fd = (fd << 32) | segnum;
@@ -623,6 +587,12 @@ sm_log_file_mgr::create_segment(segment_id *sid)
         auto *nsid = __sync_val_compare_and_swap(&active_segment, psid, sid);
         if (nsid == psid) {
             success = true;
+            ALWAYS_ASSERT(!segments[sid->segnum % NUM_LOG_SEGMENTS]);
+            // Put the segment in the array - basically just for backup to continously
+            // redo logs received which could generate new segments.
+            volatile_write(segments[sid->segnum % NUM_LOG_SEGMENTS], sid);
+            DLOG(INFO) << "Created segment " << sid->segnum << " fd=" << sid->fd << " "
+              << sid->start_offset;
             return true;
         }
     }

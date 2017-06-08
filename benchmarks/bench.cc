@@ -16,25 +16,15 @@
 #include "../dbcore/rcu.h"
 #include "../dbcore/sm-chkpt.h"
 #include "../dbcore/sm-config.h"
-#include "../dbcore/sm-file.h"
+#include "../dbcore/sm-index.h"
 #include "../dbcore/sm-log.h"
 #include "../dbcore/sm-log-recover-impl.h"
+#include "../dbcore/sm-rep.h"
 
 using namespace std;
 using namespace util;
 
 volatile bool running = true;
-int verbose = 0;
-uint64_t txn_flags = 0;
-double scale_factor = 1.0;
-uint64_t runtime = 30;
-uint64_t ops_per_worker = 0;
-int run_mode = RUNMODE_TIME;
-int enable_parallel_loading = false;
-int slow_exit = 0;
-int retry_aborted_transaction = 0;
-int backoff_aborted_transaction = 0;
-int enable_chkpt = 0;
 
 std::vector<bench_worker*> bench_runner::workers;
 
@@ -73,114 +63,154 @@ bench_worker::my_work(char *)
 	txn_counts.resize(workload.size());
 	barrier_a->count_down();
 	barrier_b->wait_for();
-	while (running && (run_mode != RUNMODE_OPS || ntxn_commits < ops_per_worker)) {
-		double d = r.next_uniform();
-		for (size_t i = 0; i < workload.size(); i++) {
-			if ((i + 1) == workload.size() || d < workload[i].frequency) {
+  while(running) {
+    double d = r.next_uniform();
+    for (size_t i = 0; i < workload.size(); i++) {
+      if ((i + 1) == workload.size() || d < workload[i].frequency) {
 retry:
-				timer t;
-				const unsigned long old_seed = r.get_seed();
-				const auto ret = workload[i].fn(this);
+        timer t;
+        const unsigned long old_seed = r.get_seed();
+        const auto ret = workload[i].fn(this);
 
-        if (likely(not rc_is_abort(ret))) {
-					++ntxn_commits;
-                    std::get<0>(txn_counts[i])++;
-					latency_numer_us += t.lap();
-					backoff_shifts >>= 1;
-				} else {
-					++ntxn_aborts;
-                    std::get<1>(txn_counts[i])++;
-                    if (ret._val == RC_ABORT_USER) {
-                        std::get<3>(txn_counts[i])++;
-                    } else {
-                        std::get<2>(txn_counts[i])++;
-                    }
-                    switch (ret._val) {
-                        case RC_ABORT_SERIAL: inc_ntxn_serial_aborts(); break;
-                        case RC_ABORT_SI_CONFLICT: inc_ntxn_si_aborts(); break;
-                        case RC_ABORT_RW_CONFLICT: inc_ntxn_rw_aborts(); break;
-                        case RC_ABORT_INTERNAL: inc_ntxn_int_aborts(); break;
-                        case RC_ABORT_PHANTOM: inc_ntxn_phantom_aborts(); break;
-                        case RC_ABORT_USER: inc_ntxn_user_aborts(); break;
-                        default: ALWAYS_ASSERT(false);
-                    }
-                    if (retry_aborted_transaction && not rc_is_user_abort(ret) && running) {
-						if (backoff_aborted_transaction) {
-							if (backoff_shifts < 63)
-								backoff_shifts++;
-							uint64_t spins = 1UL << backoff_shifts;
-							spins *= 100; // XXX: tuned pretty arbitrarily
-							while (spins) {
-								NOP_PAUSE;
-								spins--;
-							}
-						}
-						r.set_seed(old_seed);
-						goto retry;
-					}
-				}
-				break;
-			}
-			d -= workload[i].frequency;
-		}
-	}
-}
-
-void
-bench_runner::create_files_task(char *)
-{
-  ALWAYS_ASSERT(config::log_dir.size());
-  ALWAYS_ASSERT(not logmgr);
-  ALWAYS_ASSERT(not oidmgr);
-  RCU::rcu_enter();
-  logmgr = sm_log::new_log(config::recover_functor, nullptr);
-  ASSERT(oidmgr);
-  RCU::rcu_exit();
-
-  if (not sm_log::need_recovery) {
-    // allocate an FID for each table
-    for (auto &nm : sm_file_mgr::name_map) {
-      ALWAYS_ASSERT(nm.second->index);
-      auto fid = oidmgr->create_file(true);
-      nm.second->fid = fid;
-      nm.second->index->set_oid_array(fid);
-
-      // Initialize the fid_map entries
-      if (sm_file_mgr::fid_map[nm.second->fid] != nm.second) {
-        sm_file_mgr::fid_map[nm.second->fid] = nm.second;
+        if(!rc_is_abort(ret)) {
+          ++ntxn_commits;
+          std::get<0>(txn_counts[i])++;
+          if (config::group_commit) {
+            logmgr->enqueue_committed_xct(worker_id, t.get_start());
+          } else {
+            latency_numer_us += t.lap();
+          }
+          backoff_shifts >>= 1;
+        } else {
+          ++ntxn_aborts;
+          std::get<1>(txn_counts[i])++;
+          if(ret._val == RC_ABORT_USER) {
+            std::get<3>(txn_counts[i])++;
+          } else {
+            std::get<2>(txn_counts[i])++;
+          }
+          switch(ret._val) {
+            case RC_ABORT_SERIAL: inc_ntxn_serial_aborts(); break;
+            case RC_ABORT_SI_CONFLICT: inc_ntxn_si_aborts(); break;
+            case RC_ABORT_RW_CONFLICT: inc_ntxn_rw_aborts(); break;
+            case RC_ABORT_INTERNAL: inc_ntxn_int_aborts(); break;
+            case RC_ABORT_PHANTOM: inc_ntxn_phantom_aborts(); break;
+            case RC_ABORT_USER: inc_ntxn_user_aborts(); break;
+            default: ALWAYS_ASSERT(false);
+          }
+          if(config::retry_aborted_transactions && !rc_is_user_abort(ret) && running) {
+            if(config::backoff_aborted_transactions) {
+              if (backoff_shifts < 63)
+                backoff_shifts++;
+              uint64_t spins = 1UL << backoff_shifts;
+              spins *= 100; // XXX: tuned pretty arbitrarily
+              while (spins) {
+                NOP_PAUSE;
+                spins--;
+              }
+            }
+            r.set_seed(old_seed);
+            goto retry;
+          }
+        }
+        break;
       }
-
-      // log [table name, FID]
-      ASSERT(logmgr);
-      RCU::rcu_enter();
-      sm_tx_log *log = logmgr->new_tx_log();
-      log->log_fid(fid, nm.second->name);
-      log->commit(NULL);
-      RCU::rcu_exit();
+      d -= workload[i].frequency;
     }
   }
 }
 
 void
+bench_runner::create_files_task(char *)
+{
+  ALWAYS_ASSERT(!sm_log::need_recovery && !config::is_backup_srv());
+  // Allocate an FID for each index, set 2nd indexes to use
+  // the primary index's record FID/array
+  ASSERT(logmgr);
+  RCU::rcu_enter();
+  sm_tx_log *log = logmgr->new_tx_log();
+
+  for(auto &nm : IndexDescriptor::name_map) {
+    if(!nm.second->IsPrimary()) {
+      continue;
+    }
+    nm.second->Initialize();
+    log->log_index(nm.second->GetTupleFid(), nm.second->GetKeyFid(), nm.second->GetName());
+  }
+
+  // Now all primary indexes have valid FIDs, handle secondary indexes
+  for (auto &nm : IndexDescriptor::name_map) {
+    if(nm.second->IsPrimary()) {
+      continue;
+    }
+    nm.second->Initialize();
+    // Note: using the same primary's FID here; recovery must know detect this
+    log->log_index(nm.second->GetTupleFid(), nm.second->GetKeyFid(), nm.second->GetName());
+  }
+
+  log->commit(nullptr);
+  RCU::rcu_exit();
+}
+
+void
 bench_runner::run()
 {
-  // get a thread to set the stage (e.g., create tables etc)
-  auto* runner_thread = thread::get_thread();
-  thread::sm_thread::task_t runner_task = std::bind(&bench_runner::prepare, this, std::placeholders::_1);
-  runner_thread->start_task(runner_task);
-  runner_thread->join();
+  if(config::is_backup_srv()) {
+    rep::BackupStartReplication();
+  } else {
+    // Now we should already have a list of registered tables in IndexDescriptor::name_map,
+    // but all the index, oid_array fileds are empty; only the table name is available.
+    // Create the logmgr here, instead of in an sm-thread: recovery might want to utilize
+    // all the worker_threads specified in config.
+    RCU::rcu_register();
+    ALWAYS_ASSERT(config::log_dir.size());
+    ALWAYS_ASSERT(not logmgr);
+    ALWAYS_ASSERT(not oidmgr);
+    RCU::rcu_enter();
+    sm_log::allocate_log_buffer();
+    logmgr = sm_log::new_log(config::recover_functor, nullptr);
+    sm_oid_mgr::create();
+  }
+  ALWAYS_ASSERT(logmgr);
+  ALWAYS_ASSERT(oidmgr);
 
-  // start another task to create the logmgr and FIDs backing each table
-  runner_task = std::bind(&bench_runner::create_files_task, this, std::placeholders::_1);
+  LSN chkpt_lsn = logmgr->get_chkpt_start();
+  if(config::enable_chkpt) {
+    chkptmgr = new sm_chkpt_mgr(chkpt_lsn);
+  } else {
+    chkptmgr = nullptr;
+  }
+
+  // The backup will want to recover in another thread
+  if(sm_log::need_recovery && !config::is_backup_srv()) {
+    logmgr->recover();
+  }
+
+  RCU::rcu_exit();
+
+  auto* runner_thread = thread::get_thread();
+  thread::sm_thread::task_t runner_task;
+  if(!sm_log::need_recovery && !config::is_backup_srv()) {
+    // Get a thread to create the index and FIDs backing each table
+    // Note: this will insert to the log and therefore affect min_flush_lsn,
+    // so must be done in an sm-thread.
+    runner_task = std::bind(&bench_runner::create_files_task, this, std::placeholders::_1);
+    runner_thread->start_task(runner_task);
+    runner_thread->join();
+  }
+
+  // Get a thread to use benchmark-provided prepare(), which gathers information about
+  // index pointers created by create_file_task.
+  runner_task = std::bind(&bench_runner::prepare, this, std::placeholders::_1);
   runner_thread->start_task(runner_task);
   runner_thread->join();
   thread::put_thread(runner_thread);
 
-  // load data
-  if (not sm_log::need_recovery) {
+  // load data, unless we recover from logs or is a backup server (recover from shipped logs)
+  if (not sm_log::need_recovery && not config::is_backup_srv()) {
     vector<bench_loader *> loaders = make_loaders();
     {
-      scoped_timer t("dataloading", verbose);
+      scoped_timer t("dataloading", config::verbose);
       uint32_t done = 0;
     process:
       for (uint i = 0; i < loaders.size(); i++) {
@@ -203,36 +233,75 @@ bench_runner::run()
         }
       }
     }
-    RCU::rcu_register();
     RCU::rcu_enter();
     volatile_write(MM::safesnap_lsn, logmgr->cur_lsn().offset());
     ALWAYS_ASSERT(MM::safesnap_lsn);
+
+    // Persist the database
+    logmgr->flush();
+    if(config::enable_chkpt) {
+      chkptmgr->do_chkpt();  // this is synchronous
+    }
     RCU::rcu_exit();
-    RCU::rcu_deregister();
   }
-
-  volatile_write(config::loading, false);
-
-  map<string, size_t> table_sizes_before;
+  RCU::rcu_deregister();
 
   // Start checkpointer after database is ready
-  if (enable_chkpt) {
-    ASSERT(chkptmgr);
-    chkptmgr->start_chkpt_thread();
+  if(config::is_backup_srv()) {
+    // See if we need to wait for the 'go' signal from the primary
+    if(config::wait_for_primary) {
+      while(!config::IsForwardProcessing()) {}
+    }
+    if(config::log_ship_by_rdma && !config::quick_bench_start) {
+      std::cout << "Press Enter to start benchmark" << std::endl;
+      getchar();
+    }
+  } else {
+    if(config::num_backups) {
+      ALWAYS_ASSERT(not config::is_backup_srv());
+      rep::start_as_primary();
+      if (config::wait_for_backups) {
+        while (volatile_read(config::num_active_backups) != volatile_read(config::num_backups)) {}
+        std::cout << "[Primary] " << config::num_backups << " backups\n";
+      }
+    }
+
+    if(config::enable_chkpt) {
+      chkptmgr->start_chkpt_thread();
+    }
+    volatile_write(config::state, config::kStateForwardProcessing);
   }
 
-  // Persist the database
-  logmgr->flush();
+  if(config::worker_threads) {
+    start_measurement();
+  } else {
+    LOG(INFO) << "No worker threads available to run benchmarks.";
+    std::mutex trigger_lock;
+    std::unique_lock<std::mutex> lock(trigger_lock);
+    rep::backup_shutdown_trigger.wait(lock);
+    if(config::replay_policy != config::kReplayNone) {
+      while(volatile_read(rep::replayed_lsn_offset) <
+            volatile_read(rep::new_end_lsn_offset)) {}
+    }
+    cerr << "Shutdown successfully" << std::endl;
+  }
+}
 
+void bench_runner::start_measurement() {
   workers = make_workers();
   ALWAYS_ASSERT(!workers.empty());
   for (vector<bench_worker *>::const_iterator it = workers.begin();
-       it != workers.end(); ++it)
+       it != workers.end(); ++it) {
+    while(!(*it)->is_impersonated()) {
+      (*it)->try_impersonate();
+    }
     (*it)->start();
+  }
 
   barrier_a.wait_for(); // wait for all threads to start up
-  if (verbose) {
-    for (map<string, abstract_ordered_index *>::iterator it = open_tables.begin();
+  map<string, size_t> table_sizes_before;
+  if(config::verbose) {
+    for (map<string, OrderedIndex*>::iterator it = open_tables.begin();
          it != open_tables.end(); ++it) {
       const size_t s = it->second->size();
       cerr << "table " << it->first << " size " << s << endl;
@@ -244,38 +313,53 @@ bench_runner::run()
   barrier_b.count_down(); // bombs away!
 
   // Print some results every second
-  if (run_mode == RUNMODE_TIME) {
-    if (verbose) {
-      uint64_t slept = 0;
-      uint64_t last_commits = 0, last_aborts = 0;
-      printf("[Throughput] Sec,Commits,Aborts\n");
-      while (slept < runtime) {
-        sleep(1);
-        uint64_t sec_commits = 0, sec_aborts = 0;
-        for (size_t i = 0; i < config::worker_threads; i++) {
-          sec_commits += workers[i]->get_ntxn_commits();
-          sec_aborts += workers[i]->get_ntxn_aborts();
-        }
-        sec_commits -= last_commits;
-        sec_aborts -= last_aborts;
-        last_commits += sec_commits;
-        last_aborts += sec_aborts;
-        printf("[Throughput] %lu,%lu,%lu\n", slept+1, sec_commits, sec_aborts);
-        slept++;
-      };
+  uint64_t slept = 0;
+  uint64_t last_commits = 0, last_aborts = 0;
+  printf("Sec,Commits,Aborts\n");
+
+  auto gather_stats = [&]() {
+    sleep(1);
+    uint64_t sec_commits = 0, sec_aborts = 0;
+    for (size_t i = 0; i < config::worker_threads; i++) {
+      sec_commits += workers[i]->get_ntxn_commits();
+      sec_aborts += workers[i]->get_ntxn_aborts();
     }
-    else {
-      sleep(runtime);
+    sec_commits -= last_commits;
+    sec_aborts -= last_aborts;
+    last_commits += sec_commits;
+    last_aborts += sec_aborts;
+    printf("%lu,%lu,%lu\n", slept+1, sec_commits, sec_aborts);
+    slept++;
+  };
+
+  // Backups run forever until told to stop.
+  if(config::is_backup_srv()) {
+    while(!config::IsShutdown()) {
+      gather_stats();
     }
-    running = false;
+  } else {
+    while(slept < config::benchmark_seconds) {
+      gather_stats();
+    }
+  }
+  running = false;
+
+  volatile_write(config::state, config::kStateShutdown);
+  for (size_t i = 0; i < config::worker_threads; i++) {
+    workers[i]->join();
+  }
+  if(!config::is_backup_srv()) {
+    // Persist whatever still left in the log buffer
+    // Must do this after setting to shutdown state: the flusher will
+    // instead flush till the max tls_lsn_offset, instead of the minimum.
+    logmgr->flush();
   }
 
-  // Persist whatever still left in the log buffer
-  logmgr->flush();
-
+  if(config::num_backups) {
+    rep::PrimaryShutdown();
+  }
   __sync_synchronize();
-  for (size_t i = 0; i < config::worker_threads; i++)
-    workers[i]->join();
+
   const unsigned long elapsed_nosync = t_nosync.lap();
   size_t n_commits = 0;
   size_t n_aborts = 0;
@@ -337,12 +421,12 @@ bench_runner::run()
     workers[i]->~bench_worker();
   }
 
-  if (enable_chkpt)
+  if (config::enable_chkpt)
       delete chkptmgr;
 
-  if (verbose) {
+  if(config::verbose) {
     cerr << "--- table statistics ---" << endl;
-    for (map<string, abstract_ordered_index *>::iterator it = open_tables.begin();
+    for (map<string, OrderedIndex*>::iterator it = open_tables.begin();
          it != open_tables.end(); ++it) {
       const size_t s = it->second->size();
       const ssize_t delta = ssize_t(s) - ssize_t(table_sizes_before[it->first]);
@@ -362,27 +446,7 @@ bench_runner::run()
     cerr << "agg_abort_rate: " << agg_abort_rate << " aborts/sec" << endl;
     cerr << "avg_per_core_abort_rate: " << avg_per_core_abort_rate << " aborts/sec/core" << endl;
     cerr << "txn breakdown: " << format_list(agg_txn_counts.begin(), agg_txn_counts.end()) << endl;
-
-#if 0
-	RCU::rcu_gc_info gc_info = RCU::rcu_get_gc_info();
-	cerr << "--- RCU stat --- " << endl;
-	cerr << "gc_passes: " << gc_info.gc_passes << endl;
-	cerr << "objects_freed: " << gc_info.objects_freed << endl;
-	cerr << "bytes_freed: " << gc_info.bytes_freed << endl;
-	cerr << "objects_stashed : " << gc_info.objects_stashed<< endl;
-	cerr << "bytes_stashed: " << gc_info.bytes_stashed << endl;
-    cerr << "---------------------------------------" << endl;
-#endif
   }
-
-  /*
-  ALWAYS_ASSERT(n_aborts == n_user_aborts +
-                            n_int_aborts +
-                            n_si_aborts +
-                            n_serial_aborts +
-                            n_rw_aborts +
-                            n_phantom_aborts);
-							*/
 
   // output for plotting script
   cout << "---------------------------------------\n";
@@ -418,22 +482,6 @@ bench_runner::run()
          << std::get<3>(c.second) / (double)elapsed_sec << " user aborts/s\n";
   }
   cout.flush();
-
-  if (!slow_exit)
-    return;
-
-  map<string, uint64_t> agg_stats;
-  for (map<string, abstract_ordered_index *>::iterator it = open_tables.begin();
-       it != open_tables.end(); ++it) {
-    map_agg(agg_stats, it->second->clear());
-    delete it->second;
-  }
-  if (verbose) {
-    for (auto &p : agg_stats)
-      cerr << p.first << " : " << p.second << endl;
-
-  }
-  open_tables.clear();
 }
 
 template <typename K, typename V>

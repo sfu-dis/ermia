@@ -1,5 +1,4 @@
-#ifndef _NDB_TXN_H_
-#define _NDB_TXN_H_
+#pragma once
 
 #include <stdint.h>
 #include <sys/types.h>
@@ -18,21 +17,46 @@
 #include "dbcore/sm-config.h"
 #include "dbcore/sm-oid.h"
 #include "dbcore/sm-log.h"
+#include "dbcore/sm-object.h"
 #include "dbcore/sm-rc.h"
 #include "masstree_btree.h"
 #include "macros.h"
 #include "util.h"
-#include "spinlock.h"
-#include "static_vector.h"
 #include "prefetch.h"
+#include "str_arena.h"
 #include "tuple.h"
-#include "ndb_type_traits.h"
-#include "object.h"
 
 #include <sparsehash/dense_hash_map>
 using google::dense_hash_map;
 
 using namespace TXN;
+
+// A write-set entry is essentially a pointer to the OID array entry
+// begin updated. The write-set is naturally de-duplicated: repetitive
+// updates will leave only one entry by the first update. Dereferencing
+// the entry pointer results a fat_ptr to the new object.
+struct write_record_t {
+  fat_ptr* entry;
+  write_record_t(fat_ptr* entry) : entry(entry) {}
+  write_record_t() : entry(nullptr) {}
+  inline Object *get_object() { return (Object *)entry->offset(); }
+};
+
+struct write_set_t {
+  static const uint32_t kMaxEntries = 256;
+  uint32_t num_entries;
+  write_record_t entries[kMaxEntries];
+  write_set_t() : num_entries(0) {}
+  inline void emplace_back(fat_ptr* oe) {
+    ALWAYS_ASSERT(num_entries < kMaxEntries);
+    new (&entries[num_entries]) write_record_t(oe);
+    ++num_entries;
+    ASSERT(entries[num_entries-1].entry == oe);
+  }
+  inline uint32_t size() { return num_entries; }
+  inline void clear() { num_entries = 0; }
+  inline write_record_t& operator[](uint32_t idx) { return entries[idx]; }
+};
 
 // forward decl
 class base_txn_btree;
@@ -43,25 +67,11 @@ class transaction {
   friend class sm_oid_mgr;
 
 public:
-  typedef dbtuple::size_type size_type;
   typedef TXN::txn_state txn_state;
 
 #if defined(SSN) || defined(SSI)
   typedef std::vector<dbtuple *> read_set_t;
 #endif
-
-  struct write_record_t {
-    write_record_t(fat_ptr obj, oid_array *a, OID o) :
-        new_object(obj), oa(a), oid(o) {}
-    fat_ptr new_object;
-    oid_array *oa;
-    OID oid;
-    inline object *get_object() {
-      return (object *)new_object.offset();
-    }
-    write_record_t() : new_object(NULL_PTR), oa(nullptr), oid(0) {}
-  };
-  typedef std::vector<write_record_t> write_set_t;
 
   enum {
     // use the low-level scan protocol for checking scan consistency,
@@ -160,9 +170,9 @@ protected:
   absent_set_map absent_set;
 
 public:
-
   transaction(uint64_t flags, str_arena &sa);
   ~transaction();
+  void initialize_read_write();
 
   rc_t commit();
 #ifdef SSN
@@ -179,18 +189,12 @@ public:
   void abort_impl();
 
 protected:
-  bool
-  try_insert_new_tuple(
-      concurrent_btree *btr,
-      const varstr *key,
-      const varstr *value,
-      FID fid);
+  bool try_insert_new_tuple(concurrent_btree *btr, const varstr *key,
+                            varstr *value, OID* inserted_oid);
 
   // reads the contents of tuple into v
   // within this transaction context
-  rc_t
-  do_tuple_read(dbtuple *tuple, value_reader &value_reader);
-
+  rc_t do_tuple_read(dbtuple *tuple, varstr *out_v);
   rc_t do_node_read(const typename concurrent_btree::node_opaque_t *n, uint64_t version);
 
 public:
@@ -202,14 +206,15 @@ public:
     return *sa;
   }
 
-  void add_to_write_set(fat_ptr objptr, oid_array *oa, OID oid) {
+  inline void add_to_write_set(fat_ptr* entry) {
 #ifndef NDEBUG
-    for (uint32_t i = 0; i < write_set->size(); ++i) {
-      auto& w = (*write_set)[i];
-      ASSERT(w.new_object != objptr);
+    for (uint32_t i = 0; i < write_set.size(); ++i) {
+      auto& w = write_set[i];
+      ASSERT(w.entry);
+      ASSERT(w.entry != entry);
     }
 #endif
-    write_set->emplace_back(objptr, oa, oid);
+    write_set.emplace_back(entry);
   }
 
 protected:
@@ -218,9 +223,8 @@ protected:
   xid_context *xc;
   sm_tx_log* log;
   str_arena *sa;
-  write_set_t* write_set;
+  write_set_t& write_set;
 #if defined(SSN) || defined(SSI)
   read_set_t* read_set;
 #endif
 };
-#endif /* _NDB_TXN_H_ */

@@ -74,8 +74,8 @@ build_rmw_key(int worker_id) {
 class ycsb_worker : public bench_worker {
 public:
   ycsb_worker(unsigned int worker_id,
-              unsigned long seed, abstract_db *db,
-              const map<string, abstract_ordered_index *> &open_tables,
+              unsigned long seed, ndb_wrapper *db,
+              const map<string, OrderedIndex *> &open_tables,
               spin_barrier *barrier_a, spin_barrier *barrier_b)
     : bench_worker(worker_id, seed, db,
                    open_tables, barrier_a, barrier_b),
@@ -131,7 +131,7 @@ public:
   }
 
   rc_t txn_rmw() {
-    void *txn = db->new_txn(0, arena, txn_buf(), abstract_db::HINT_DEFAULT);
+    transaction *txn = db->new_txn(0, arena, txn_buf());
     arena.reset();
     for (uint i = 0; i < g_reps_per_tx; ++i) {
       auto& key = build_rmw_key(worker_id);
@@ -163,21 +163,21 @@ protected:
   }
 
 private:
-  abstract_ordered_index *tbl;
+  OrderedIndex *tbl;
 };
 
 class ycsb_usertable_loader : public bench_loader {
 public:
   ycsb_usertable_loader(unsigned long seed,
-                        abstract_db *db,
-                        const map<string, abstract_ordered_index *> &open_tables)
+                        ndb_wrapper *db,
+                        const map<string, OrderedIndex *> &open_tables)
     : bench_loader(seed, db, open_tables)
   {}
 
 protected:
   // XXX(tzwang): for now this is serial
   void load() {
-    abstract_ordered_index *tbl = open_tables.at("USERTABLE");
+    OrderedIndex *tbl = open_tables.at("USERTABLE");
     std::vector<YcsbKey> keys;
     uint64_t records_per_thread = g_initial_table_size / config::worker_threads;
     bool spread = true;
@@ -189,7 +189,7 @@ protected:
       g_initial_table_size = records_per_thread * config::worker_threads;
     }
 
-    if (verbose) {
+    if(config::verbose) {
       cerr << "[INFO] requested for " << g_initial_table_size << " records, will load " 
         << records_per_thread * config::worker_threads << endl;
     }
@@ -222,27 +222,26 @@ protected:
       YcsbRecord r('a');
       varstr k((char *)&key.data_, sizeof(key));
       varstr v(r.data_, sizeof(r));
-      void *txn = db->new_txn(0, arena, txn_buf(), abstract_db::HINT_DEFAULT);
+      transaction *txn = db->new_txn(0, arena, txn_buf());
       arena.reset();
       try_verify_strict(tbl->insert(txn, k, v));
       try_verify_strict(db->commit_txn(txn));
     }
 
-    if (verbose)
+    if(config::verbose)
       cerr << "[INFO] loaded " << inserted << " kyes in USERTABLE" << endl;
   }
 };
 
 class ycsb_bench_runner : public bench_runner {
 public:
-  ycsb_bench_runner(abstract_db *db)
-    : bench_runner(db)
-  {
+  ycsb_bench_runner(ndb_wrapper *db) : bench_runner(db) {
+    IndexDescriptor::New("USERTABLE");
   }
 
   virtual void prepare(char *)
   {
-    open_tables["USERTABLE"] = db->open_index("USERTABLE", kRecordSize);
+    open_tables["USERTABLE"] = IndexDescriptor::GetIndex("USERTABLE");
   }
 
 protected:
@@ -259,17 +258,18 @@ protected:
   {
     fast_random r(8544290);
     vector<bench_worker *> ret;
-    for (size_t i = 0; i < config::worker_threads; i++)
+    for (size_t i = 0; i < config::worker_threads; i++) {
       ret.push_back(
         new ycsb_worker(
           i, r.next(), db, open_tables,
           &barrier_a, &barrier_b));
+    }
     return ret;
   }
 };
 
 void
-ycsb_do_test(abstract_db *db, int argc, char **argv)
+ycsb_do_test(ndb_wrapper *db, int argc, char **argv)
 {
   // parse options
   optind = 1;
@@ -342,7 +342,7 @@ ycsb_do_test(abstract_db *db, int argc, char **argv)
 
   ALWAYS_ASSERT(g_initial_table_size);
 
-  if (verbose) {
+  if(config::verbose) {
     cerr << "ycsb settings:" << endl
          << "  workload:                   " << g_workload << endl
          << "  initial user table size:    " << g_initial_table_size << endl
