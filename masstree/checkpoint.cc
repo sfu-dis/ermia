@@ -18,13 +18,12 @@
 // add one key/value to a checkpoint.
 // called by checkpoint_tree() for each node.
 bool ckstate::visit_value(Str key, const row_type* value, threadinfo&) {
-    if (endkey && key >= endkey)
-        return false;
-    if (!row_is_marker(value)) {
-        msgpack::unparser<kvout> up(*vals);
-        up.write(key).write_wide(value->timestamp());
-        value->checkpoint_write(up);
-        ++count;
-    }
-    return true;
+  if (endkey && key >= endkey) return false;
+  if (!row_is_marker(value)) {
+    msgpack::unparser<kvout> up(*vals);
+    up.write(key).write_wide(value->timestamp());
+    value->checkpoint_write(up);
+    ++count;
+  }
+  return true;
 }

@@ -30,83 +30,76 @@
 #include <errno.h>
 #include "kvio.hh"
 
-
 // API to allocate a new kvout.
 kvout* new_kvout(int fd, int buflen) {
-    kvout* kv = (kvout*) malloc(sizeof(kvout));
-    assert(kv);
-    memset(kv, 0, sizeof(*kv));
-    kv->capacity = buflen;
-    kv->buf = (char*) malloc(kv->capacity);
-    assert(kv->buf);
-    kv->fd = fd;
-    return kv;
+  kvout* kv = (kvout*)malloc(sizeof(kvout));
+  assert(kv);
+  memset(kv, 0, sizeof(*kv));
+  kv->capacity = buflen;
+  kv->buf = (char*)malloc(kv->capacity);
+  assert(kv->buf);
+  kv->fd = fd;
+  return kv;
 }
 
 // API to allocate a new kvout for a buffer, no fd.
 kvout* new_bufkvout() {
-    kvout *kv = (kvout*) malloc(sizeof(kvout));
-    assert(kv);
-    memset(kv, 0, sizeof(*kv));
-    kv->capacity = 256;
-    kv->buf = (char*) malloc(kv->capacity);
-    assert(kv->buf);
-    kv->n = 0;
-    kv->fd = -1;
-    return kv;
+  kvout* kv = (kvout*)malloc(sizeof(kvout));
+  assert(kv);
+  memset(kv, 0, sizeof(*kv));
+  kv->capacity = 256;
+  kv->buf = (char*)malloc(kv->capacity);
+  assert(kv->buf);
+  kv->n = 0;
+  kv->fd = -1;
+  return kv;
 }
 
 // API to clear out a buf kvout.
 void kvout_reset(kvout* kv) {
-    assert(kv->fd < 0);
-    kv->n = 0;
+  assert(kv->fd < 0);
+  kv->n = 0;
 }
 
 // API to free a kvout.
 // does not close() the fd.
 void free_kvout(kvout* kv) {
-    if (kv->buf)
-        free(kv->buf);
-    kv->buf = 0;
-    free(kv);
+  if (kv->buf) free(kv->buf);
+  kv->buf = 0;
+  free(kv);
 }
 
 void kvflush(kvout* kv) {
-    assert(kv->fd >= 0);
-    size_t sent = 0;
-    while (kv->n > sent) {
-        ssize_t cc = write(kv->fd, kv->buf + sent, kv->n - sent);
-        if (cc <= 0) {
-            if (errno == EWOULDBLOCK) {
-                usleep(1);
-                continue;
-            }
-            perror("kvflush write");
-            return;
-        }
-        sent += cc;
+  assert(kv->fd >= 0);
+  size_t sent = 0;
+  while (kv->n > sent) {
+    ssize_t cc = write(kv->fd, kv->buf + sent, kv->n - sent);
+    if (cc <= 0) {
+      if (errno == EWOULDBLOCK) {
+        usleep(1);
+        continue;
+      }
+      perror("kvflush write");
+      return;
     }
-    kv->n = 0;
+    sent += cc;
+  }
+  kv->n = 0;
 }
 
 // API
 void kvout::grow(unsigned want) {
-    if (fd >= 0)
-        kvflush(this);
-    if (want == 0)
-        want = capacity + 1;
-    while (want > capacity)
-        capacity *= 2;
-    buf = (char*) realloc(buf, capacity);
-    assert(buf);
+  if (fd >= 0) kvflush(this);
+  if (want == 0) want = capacity + 1;
+  while (want > capacity) capacity *= 2;
+  buf = (char*)realloc(buf, capacity);
+  assert(buf);
 }
 
 int kvwrite(kvout* kv, const void* buf, unsigned n) {
-    if (kv->n + n > kv->capacity && kv->fd >= 0)
-        kvflush(kv);
-    if (kv->n + n > kv->capacity)
-        kv->grow(kv->n + n);
-    memcpy(kv->buf + kv->n, buf, n);
-    kv->n += n;
-    return n;
+  if (kv->n + n > kv->capacity && kv->fd >= 0) kvflush(kv);
+  if (kv->n + n > kv->capacity) kv->grow(kv->n + n);
+  memcpy(kv->buf + kv->n, buf, n);
+  kv->n += n;
+  return n;
 }
