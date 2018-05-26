@@ -4,6 +4,8 @@
 #include "sm-object.h"
 #include "../tuple.h"
 
+namespace ermia {
+
 // Dig out the payload from the durable log
 // ptr should point to some position in the log and its size_code should refer
 // to only data size (i.e., the size of the payload of dbtuple rounded up).
@@ -148,3 +150,4 @@ fat_ptr Object::GenerateClsnPtr(uint64_t clsn) {
   }
   return clsn_ptr;
 }
+}  // namespace ermia

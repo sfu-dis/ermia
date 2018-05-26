@@ -4,6 +4,8 @@
 #include "sm-common.h"
 #include "../varstr.h"
 
+namespace ermia {
+
 struct dbtuple;
 class sm_log_recover_mgr;
 
@@ -91,3 +93,4 @@ class Object {
   void Pin(
       bool load_from_logbuf = false);  // Make sure the payload is in memory
 };
+}  // namespace ermia
