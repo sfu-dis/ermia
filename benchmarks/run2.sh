@@ -8,7 +8,7 @@
 
 if [[ $# -lt 4 ]]; then
     echo "Too few arguments. "
-    echo "Usage $0 <executable> <benchmark> <threads> <runtime>"
+    echo "Usage $0 <executable> <benchmark> <threads> <logbuf(MB)>"
     exit
 fi
 
