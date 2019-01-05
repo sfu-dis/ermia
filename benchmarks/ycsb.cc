@@ -117,19 +117,24 @@ class ycsb_worker : public bench_worker {
     arena.reset();
     for (uint i = 0; i < g_reps_per_tx; ++i) {
       auto &key = build_rmw_key(worker_id);
-      ermia::varstr k((char *)&key.data_, sizeof(key));
-      ermia::varstr v = str(sizeof(YcsbRecord));
+      ermia::varstr &k = str(sizeof(ermia::varstr) + sizeof(key));
+      *(uint64_t*)k.p = key.data_;
+      k.l = sizeof(key);
+
+      ermia::varstr &v = str(sizeof(ermia::varstr) + sizeof(r));
       // TODO(tzwang): add read/write_all_fields knobs
       try_catch(tbl->get(txn, k, v));  // Read
-      memset(v.data(), 'a', v.size());
-      ASSERT(v.size() == sizeof(YcsbRecord));
+      memset(v.data(), 'a', 1);
       try_catch(tbl->put(txn, k, v));  // Modify-write
     }
 
     for (uint i = 0; i < g_rmw_additional_reads; ++i) {
       auto &key = build_rmw_key(worker_id);
-      ermia::varstr k((char *)&key.data_, sizeof(key));
-      ermia::varstr v = str(sizeof(YcsbRecord));
+      ermia::varstr &k = str(sizeof(ermia::varstr) + sizeof(key));
+      *(uint64_t*)k.p = key.data_;
+      k.l = sizeof(key);
+
+      ermia::varstr &v = str(sizeof(ermia::varstr) + sizeof(r));
       // TODO(tzwang): add read/write_all_fields knobs
       try_catch(tbl->get(txn, k, v));  // Read
     }
@@ -196,9 +201,14 @@ class ycsb_usertable_loader : public bench_loader {
 
     // start a transaction and insert all the records
     for (auto &key : keys) {
-      YcsbRecord r('a');
-      ermia::varstr k((char *)&key.data_, sizeof(key));
-      ermia::varstr v(r.data_, sizeof(r));
+      // Key - varstr header and data must be contiguous
+      ermia::varstr &k = str(sizeof(ermia::varstr) + sizeof(key));
+      *(uint64_t*)k.p = key.data_;
+      k.l = sizeof(key);
+
+      // Record
+      ermia::varstr &v = str(sizeof(ermia::varstr) + sizeof(r));
+      *(char*)v.p = 'a';
       ermia::transaction *txn = db->new_txn(0, arena, txn_buf());
       arena.reset();
       try_verify_strict(tbl->insert(txn, k, v));
