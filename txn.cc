@@ -1179,6 +1179,7 @@ bool transaction::check_phantom() {
 
 bool transaction::try_insert_new_tuple(concurrent_btree *btr, const varstr *key,
                                        varstr *value, OID *inserted_oid) {
+  ASSERT((char *)key->data() == (char *)key + sizeof(varstr));
   ASSERT(key);
   OID oid = 0;
   IndexDescriptor *id = btr->get_descriptor();

@@ -54,6 +54,7 @@ rc_t base_txn_btree::do_tree_put(transaction &t, const varstr *k, varstr *v,
                                  bool expect_new, bool upsert,
                                  OID *inserted_oid) {
   ASSERT(k);
+  ASSERT((char *)k->data() == (char *)k + sizeof(varstr));
   ASSERT(!expect_new || v);  // makes little sense to remove() a key you expect
   // to not be present, so we assert this doesn't happen
   // for now [since this would indicate a suboptimality]
