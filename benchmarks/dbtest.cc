@@ -320,6 +320,8 @@ int main(int argc, char **argv) {
   std::cerr << "  read opt threshold     : 0x" << std::hex
        << ermia::config::ssn_read_opt_threshold << std::dec << std::endl;
 #endif
+#elif defined(MVOCC)
+  std::cerr << "MVOCC";
 #else
   std::cerr << "SI";
 #endif
