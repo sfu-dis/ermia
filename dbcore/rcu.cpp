@@ -1,18 +1,17 @@
-#include "rcu.h"
-
-#include "epoch.h"
-#include "sm-exceptions.h"
-#include "sm-common.h"
-#include "size-encode.h"
-#include "sm-defs.h"
-
 #include <stdint.h>
 #include <pthread.h>
 #include <map>
-#include <cstdio>
-#include <stdlib.h>
 #include <new>
 #include <algorithm>
+
+#include "../macros.h"
+
+#include "epoch.h"
+#include "rcu.h"
+#include "size-encode.h"
+#include "sm-exceptions.h"
+#include "sm-common.h"
+#include "sm-defs.h"
 
 namespace ermia {
 namespace RCU {
@@ -41,7 +40,7 @@ struct pointer_stash {
  */
 struct rcu_tcb {
   static rcu_tcb *tls() {
-    static __thread rcu_tcb local;
+    static thread_local rcu_tcb local;
     return &local;
   }
 
@@ -127,7 +126,7 @@ void rcu_delete_v(void *ptr) {
  ***************************************/
 void rcu_global_init(void *) { RCU_LOG("Initializing RCU subsystem"); }
 epoch_mgr::tls_storage *rcu_get_tls(void *) {
-  static __thread epoch_mgr::tls_storage s;
+  static thread_local epoch_mgr::tls_storage s;
   return &s;
 }
 
@@ -206,6 +205,7 @@ void rcu_thread_deregistered(void *, void *thread_cookie) {
 }
 
 void *rcu_epoch_ended(void *, epoch_mgr::epoch_num x) {
+  MARK_REFERENCED(x);
   RCU_LOG("Epoch %zd ended", x);
   rcu_free_target.objects_freed =
       rcu_free_counts.objects_freed + rcu_gc_threshold_nobj;

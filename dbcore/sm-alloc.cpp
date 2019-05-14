@@ -43,18 +43,18 @@ static const uint64_t EPOCH_SIZE_COUNT = 2000;
 uint64_t epoch_excl_begin_lsn[3] = {0, 0, 0};
 uint64_t epoch_reclaim_lsn[3] = {0, 0, 0};
 
-static __thread struct thread_data epoch_tls CACHE_ALIGNED;
+static thread_local struct thread_data epoch_tls CACHE_ALIGNED;
 epoch_mgr mm_epochs{{nullptr, &global_init, &get_tls, &thread_registered,
                      &thread_deregistered, &epoch_ended, &epoch_ended_thread,
                      &epoch_reclaimed}};
 
 uint64_t safesnap_lsn = 0;
 
-__thread TlsFreeObjectPool *tls_free_object_pool CACHE_ALIGNED;
+thread_local TlsFreeObjectPool *tls_free_object_pool CACHE_ALIGNED;
 char **node_memory = nullptr;
 uint64_t *allocated_node_memory = nullptr;
-static uint64_t __thread tls_allocated_node_memory CACHE_ALIGNED;
-static const uint64_t tls_node_memory_gb = 1;
+static uint64_t thread_local tls_allocated_node_memory CACHE_ALIGNED;
+static const uint64_t tls_node_memory_mb = 200;
 
 void prepare_node_memory() {
   ALWAYS_ASSERT(config::numa_nodes);
@@ -123,35 +123,27 @@ void gc_version_chain(fat_ptr *oid_entry) {
     ptr = cur_obj->GetNextVolatile();
     prev_next = cur_obj->GetNextVolatilePtr();
     // If the chkpt needs to be a consistent one, must make sure not to GC a
-    // version
-    // that might be needed by chkpt:
+    // version that might be needed by chkpt:
     // uint64_t glsn = std::min(logmgr->durable_flushed_lsn().offset(),
     // volatile_read(gc_lsn));
     // This makes the GC thread has to traverse longer in the chain, unless
     // with small log buffers or frequent log flush, which is bad for disk
-    // performance.
-    // For good performance, we use inconsistent chkpt which grabs the latest
-    // committed
-    // version directly. Log replay after the chkpt-start lsn is necessary for
-    // correctness.
+    // performance.  For good performance, we use inconsistent chkpt which
+    // grabs the latest committed version directly. Log replay after the
+    // chkpt-start lsn is necessary for correctness.
     uint64_t glsn = volatile_read(gc_lsn);
     if (LSN::from_ptr(clsn).offset() <= glsn && ptr._ptr) {
       // Fast forward to the **second** version < gc_lsn. Consider that we set
-      // safesnap
-      // lsn to 1.8, and gc_lsn to 1.6. Assume we have two versions with LSNs 2
-      // and 1.5.
-      // We need to keep the one with LSN=1.5 although its < gc_lsn; otherwise
-      // the tx
-      // using safesnap won't be able to find any version available.
+      // safesnap lsn to 1.8, and gc_lsn to 1.6. Assume we have two versions
+      // with LSNs 2 and 1.5.  We need to keep the one with LSN=1.5 although
+      // its < gc_lsn; otherwise the tx using safesnap won't be able to find
+      // any version available.
       //
       // We only traverse and GC a version chain when an update transaction
-      // successfully
-      // installed a version. So at any time there will be only one guy possibly
-      // doing
-      // this for a version chain - just blind write. If we're traversing at
-      // other times,
-      // e.g., after committed, then a CAS is needed:
-      // __sync_bool_compare_and_swap(&prev_next->_ptr, ptr._ptr, 0)) {
+      // successfully installed a version. So at any time there will be only
+      // one guy possibly doing this for a version chain - just blind write. If
+      // we're traversing at other times, e.g., after committed, then a CAS is
+      // needed: __sync_bool_compare_and_swap(&prev_next->_ptr, ptr._ptr, 0)
       volatile_write(prev_next->_ptr, 0);
       while (ptr.offset()) {
         cur_obj = (Object *)ptr.offset();
@@ -172,7 +164,7 @@ void gc_version_chain(fat_ptr *oid_entry) {
   }
 }
 
-void *allocate(size_t size, epoch_num e) {
+void *allocate(size_t size) {
   size = align_up(size);
   void *p = NULL;
 
@@ -188,10 +180,10 @@ void *allocate(size_t size, epoch_num e) {
 
   ALWAYS_ASSERT(not p);
   // Have to use the vanilla bump allocator, hopefully later we reuse them
-  static __thread char *tls_node_memory CACHE_ALIGNED;
+  static thread_local char *tls_node_memory CACHE_ALIGNED;
   if (unlikely(not tls_node_memory) or
-      tls_allocated_node_memory + size >= tls_node_memory_gb * config::GB) {
-    tls_node_memory = (char *)allocate_onnode(tls_node_memory_gb * config::GB);
+      tls_allocated_node_memory + size >= tls_node_memory_mb * config::MB) {
+    tls_node_memory = (char *)allocate_onnode(tls_node_memory_mb * config::MB);
     tls_allocated_node_memory = 0;
   }
 
@@ -242,7 +234,7 @@ void global_init(void *) {
 }
 
 epoch_mgr::tls_storage *get_tls(void *) {
-  static __thread epoch_mgr::tls_storage s;
+  static thread_local epoch_mgr::tls_storage s;
   return &s;
 }
 void *thread_registered(void *) {
@@ -253,6 +245,7 @@ void *thread_registered(void *) {
 }
 
 void thread_deregistered(void *cookie, void *thread_cookie) {
+  MARK_REFERENCED(cookie);
   auto *t = (thread_data *)thread_cookie;
   ASSERT(t == &epoch_tls);
   t->initialized = false;
@@ -261,6 +254,7 @@ void thread_deregistered(void *cookie, void *thread_cookie) {
 }
 
 void *epoch_ended(void *cookie, epoch_num e) {
+  MARK_REFERENCED(cookie);
   // remember the epoch number so we can find it out when it's reclaimed later
   epoch_num *epoch = (epoch_num *)malloc(sizeof(epoch_num));
   *epoch = e;
@@ -269,10 +263,13 @@ void *epoch_ended(void *cookie, epoch_num e) {
 
 void *epoch_ended_thread(void *cookie, void *epoch_cookie,
                          void *thread_cookie) {
+  MARK_REFERENCED(cookie);
+  MARK_REFERENCED(thread_cookie);
   return epoch_cookie;
 }
 
 void epoch_reclaimed(void *cookie, void *epoch_cookie) {
+  MARK_REFERENCED(cookie);
   epoch_num e = *(epoch_num *)epoch_cookie;
   free(epoch_cookie);
   uint64_t my_begin_lsn = epoch_excl_begin_lsn[e % 3];
@@ -307,14 +304,13 @@ void epoch_exit(uint64_t s, epoch_num e) {
   // Transactions under a safesnap will pass s = 0 (INVALID_LSN)
   if (s != 0 && (epoch_tls.nbytes >= EPOCH_SIZE_NBYTES ||
                  epoch_tls.counts >= EPOCH_SIZE_COUNT)) {
-    // epoch_ended() (which is called by new_epoch() in its critical
-    // section) will pick up this safe lsn if new_epoch() succeeded
-    // (it could also be set by somebody else who's also doing epoch_exit(),
-    // but this is captured before new_epoch succeeds, so we're fine).
-    // If instead, we do this in epoch_ended(), that cur_lsn captured
-    // actually belongs to the *new* epoch - not safe to gc based on
-    // this lsn. The real gc_lsn should be some lsn at the end of the
-    // ending epoch, not some lsn after the next epoch.
+    // epoch_ended() (which is called by new_epoch() in its critical section)
+    // will pick up this safe lsn if new_epoch() succeeded (it could also be
+    // set by somebody else who's also doing epoch_exit(), but this is captured
+    // before new_epoch succeeds, so we're fine).  If instead, we do this in
+    // epoch_ended(), that cur_lsn captured actually belongs to the *new* epoch
+    // - not safe to gc based on this lsn. The real gc_lsn should be some lsn
+    // at the end of the ending epoch, not some lsn after the next epoch.
     epoch_excl_begin_lsn[(e + 1) % 3] = s;
     if (mm_epochs.new_epoch_possible() && mm_epochs.new_epoch()) {
       epoch_tls.nbytes = epoch_tls.counts = 0;

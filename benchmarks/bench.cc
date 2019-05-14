@@ -52,7 +52,7 @@ retry:
 }
 
 bool bench_worker::finish_workload(rc_t ret, uint32_t workload_idx, util::timer &t) {
-  if (!rc_is_abort(ret)) {
+  if (!ret.IsAbort()) {
     ++ntxn_commits;
     std::get<0>(txn_counts[workload_idx])++;
     if (!ermia::config::is_backup_srv() && ermia::config::group_commit) {
@@ -91,8 +91,7 @@ bool bench_worker::finish_workload(rc_t ret, uint32_t workload_idx, util::timer 
       default:
         ALWAYS_ASSERT(false);
     }
-    if (ermia::config::retry_aborted_transactions && !rc_is_user_abort(ret) &&
-        running) {
+    if (ermia::config::retry_aborted_transactions && !ret.IsUserAbort() && running) {
       if (ermia::config::backoff_aborted_transactions) {
         if (backoff_shifts < 63) backoff_shifts++;
         uint64_t spins = 1UL << backoff_shifts;
@@ -108,7 +107,7 @@ bool bench_worker::finish_workload(rc_t ret, uint32_t workload_idx, util::timer 
   return false;
 }
 
-void bench_worker::my_work(char *) {
+void bench_worker::MyWork(char *) {
   if (is_worker) {
     workload = get_workload();
     txn_counts.resize(workload.size());
@@ -170,67 +169,20 @@ void bench_runner::create_files_task(char *) {
 }
 
 void bench_runner::run() {
-  if (ermia::config::is_backup_srv()) {
-    ermia::rep::BackupStartReplication();
-  } else {
-    // Now we should already have a list of registered tables in
-    // ermia::IndexDescriptor::name_map, but all the index, oid_array fileds are
-    // empty; only the table name is available.  Create the ermia::logmgr here,
-    // instead of in an sm-thread: recovery might want to utilize all the
-    // worker_threads specified in config.
-    ermia::RCU::rcu_register();
-    ALWAYS_ASSERT(ermia::config::log_dir.size());
-    ALWAYS_ASSERT(not ermia::logmgr);
-    ALWAYS_ASSERT(not ermia::oidmgr);
-    ermia::RCU::rcu_enter();
-    ermia::sm_log::allocate_log_buffer();
-    ermia::logmgr = ermia::sm_log::new_log(ermia::config::recover_functor, nullptr);
-    ermia::sm_oid_mgr::create();
-    if (ermia::config::command_log) {
-      ermia::CommandLog::cmd_log = new ermia::CommandLog::CommandLogManager();
-    }
-  }
-  ALWAYS_ASSERT(ermia::logmgr);
-  ALWAYS_ASSERT(ermia::oidmgr);
-
-  ermia::LSN chkpt_lsn = ermia::logmgr->get_chkpt_start();
-  if (ermia::config::enable_chkpt) {
-    ermia::chkptmgr = new ermia::sm_chkpt_mgr(chkpt_lsn);
-  } else {
-    ermia::chkptmgr = nullptr;
-  }
-
-  // The backup will want to recover in another thread
-  if (ermia::sm_log::need_recovery && !ermia::config::is_backup_srv()) {
-    ermia::logmgr->recover();
-  }
-
-  ermia::RCU::rcu_exit();
-
-  ermia::thread::sm_thread *runner_thread = nullptr;
-  ermia::thread::sm_thread::task_t runner_task;
-  if (!ermia::sm_log::need_recovery && !ermia::config::is_backup_srv()) {
-    runner_thread = ermia::thread::get_thread();
-    // Get a thread to create the index and FIDs backing each table
-    // Note: this will insert to the log and therefore affect min_flush_lsn,
-    // so must be done in an sm-thread.
-    runner_task = std::bind(&bench_runner::create_files_task, this,
-                            std::placeholders::_1);
-    runner_thread->start_task(runner_task);
-    runner_thread->join();
-  }
-
   if (ermia::config::worker_threads ||
       (ermia::config::is_backup_srv() && ermia::config::replay_threads && ermia::config::command_log)) {
     // Get a thread to use benchmark-provided prepare(), which gathers
     // information about index pointers created by create_file_task.
-    runner_task = std::bind(&bench_runner::prepare, this, std::placeholders::_1);
-    if (!runner_thread) {
-      runner_thread = ermia::thread::get_thread();
-    }
-    runner_thread->start_task(runner_task);
-    runner_thread->join();
-    ermia::thread::put_thread(runner_thread);
+    ermia::thread::Thread::Task runner_task =
+      std::bind(&bench_runner::prepare, this, std::placeholders::_1);
+    ermia::thread::Thread *runner_thread = ermia::thread::GetThread(true /* physical */);
+    runner_thread->StartTask(runner_task);
+    runner_thread->Join();
+    ermia::thread::PutThread(runner_thread);
+  }
+
+  if (!ermia::RCU::rcu_is_registered()) {
+    ermia::RCU::rcu_register();
   }
 
   // load data, unless we recover from logs or is a backup server (recover from
@@ -243,9 +195,9 @@ void bench_runner::run() {
     process:
       for (uint i = 0; i < loaders.size(); i++) {
         auto *loader = loaders[i];
-        if (loader and not loader->is_impersonated() and
-            loader->try_impersonate()) {
-          loader->start();
+        if (loader and not loader->IsImpersonated() and
+            loader->TryImpersonate()) {
+          loader->Start();
         }
       }
 
@@ -253,7 +205,7 @@ void bench_runner::run() {
       while (done < loaders.size()) {
         for (uint i = 0; i < loaders.size(); i++) {
           auto *loader = loaders[i];
-          if (loader and loader->is_impersonated() and loader->try_join()) {
+          if (loader and loader->IsImpersonated() and loader->TryJoin()) {
             delete loader;
             loaders[i] = nullptr;
             done++;
@@ -287,10 +239,10 @@ void bench_runner::run() {
         bg.detach();
       }
       for (auto &r : cmdlog_redoers) {
-        while (!r->is_impersonated()) {
-          r->try_impersonate();
+        while (!r->IsImpersonated()) {
+          r->TryImpersonate();
         }
-        r->start();
+        r->Start();
       }
       LOG(INFO) << "Started all redoers";
     }
@@ -319,7 +271,7 @@ void bench_runner::run() {
     if (ermia::config::enable_chkpt) {
       ermia::chkptmgr->start_chkpt_thread();
     }
-    volatile_write(ermia::config::state, ermia::config::kStateForwardProcessing);
+    ermia::volatile_write(ermia::config::state, ermia::config::kStateForwardProcessing);
   }
 
   // Start a thread that dumps read view LSN
@@ -347,7 +299,7 @@ void bench_runner::run() {
   if (ermia::config::is_backup_srv() && ermia::config::command_log && cmdlog_redoers.size()) {
     tx_stat_map agg = cmdlog_redoers[0]->get_cmdlog_txn_counts();
     for (size_t i = 1; i < cmdlog_redoers.size(); i++) {
-      cmdlog_redoers[i]->join();
+      cmdlog_redoers[i]->Join();
       auto &c = cmdlog_redoers[i]->get_cmdlog_txn_counts();
       for (auto &t : c) {
         std::get<0>(agg[t.first]) += std::get<0>(t.second);
@@ -356,8 +308,10 @@ void bench_runner::run() {
         std::get<3>(agg[t.first]) += std::get<3>(t.second);
       }
     }
+#ifndef __clang__
     std::cerr << "cmdlog txn breakdown: "
       << util::format_list(agg.begin(), agg.end()) << std::endl;
+#endif
   }
   if (ermia::config::read_view_stat_interval_ms) {
     read_view_observer.join();
@@ -395,10 +349,10 @@ void bench_runner::start_measurement() {
   ALWAYS_ASSERT(!workers.empty());
   for (std::vector<bench_worker *>::const_iterator it = workers.begin();
        it != workers.end(); ++it) {
-    while (!(*it)->is_impersonated()) {
-      (*it)->try_impersonate();
+    while (!(*it)->IsImpersonated()) {
+      (*it)->TryImpersonate();
     }
-    (*it)->start();
+    (*it)->Start();
   }
 
   barrier_a.wait_for();  // wait for all threads to start up
@@ -406,7 +360,7 @@ void bench_runner::start_measurement() {
   if (ermia::config::verbose) {
     for (std::map<std::string, ermia::OrderedIndex *>::iterator it = open_tables.begin();
          it != open_tables.end(); ++it) {
-      const size_t s = it->second->size();
+      const size_t s = it->second->Size();
       std::cerr << "table " << it->first << " size " << s << std::endl;
       table_sizes_before[it->first] = s;
     }
@@ -504,9 +458,9 @@ void bench_runner::start_measurement() {
   }
   running = false;
 
-  volatile_write(ermia::config::state, ermia::config::kStateShutdown);
+  ermia::volatile_write(ermia::config::state, ermia::config::kStateShutdown);
   for (size_t i = 0; i < ermia::config::worker_threads; i++) {
-    workers[i]->join();
+    workers[i]->Join();
   }
 
   if (ermia::config::num_backups) {
@@ -514,7 +468,7 @@ void bench_runner::start_measurement() {
     if (ermia::config::command_log) {
       delete ermia::CommandLog::cmd_log;
       for (auto &t : bench_runner::cmdlog_redoers) {
-        t->join();
+        t->Join();
       }
     }
     ermia::rep::PrimaryShutdown();
@@ -604,7 +558,6 @@ void bench_runner::start_measurement() {
       std::get<2>(agg_txn_counts[t.first]) += std::get<2>(t.second);
       std::get<3>(agg_txn_counts[t.first]) += std::get<3>(t.second);
     }
-    workers[i]->~bench_worker();
   }
 
   if (ermia::config::enable_chkpt) delete ermia::chkptmgr;
@@ -613,9 +566,9 @@ void bench_runner::start_measurement() {
     std::cerr << "--- table statistics ---" << std::endl;
     for (std::map<std::string, ermia::OrderedIndex *>::iterator it = open_tables.begin();
          it != open_tables.end(); ++it) {
-      const size_t s = it->second->size();
+      const size_t s = it->second->Size();
       const ssize_t delta = ssize_t(s) - ssize_t(table_sizes_before[it->first]);
-      std::cerr << "table " << it->first << " size " << it->second->size();
+      std::cerr << "table " << it->first << " size " << it->second->Size();
       if (delta < 0)
         std::cerr << " (" << delta << " records)" << std::endl;
       else
@@ -635,8 +588,10 @@ void bench_runner::start_measurement() {
     std::cerr << "agg_abort_rate: " << agg_abort_rate << " aborts/sec" << std::endl;
     std::cerr << "avg_per_core_abort_rate: " << avg_per_core_abort_rate
          << " aborts/sec/core" << std::endl;
+#ifndef __clang__
     std::cerr << "txn breakdown: " << util::format_list(agg_txn_counts.begin(),
                                                    agg_txn_counts.end()) << std::endl;
+#endif
     if (ermia::config::is_backup_srv()) {
       std::cerr << "agg_replay_time: " << agg_replay_latency_ms << " ms" << std::endl;
       std::cerr << "agg_redo_batches: " << agg_redo_batches << std::endl;

@@ -42,6 +42,11 @@ $ cmake ../ -DCMAKE_BUILD_TYPE=[Debug/Release/RelWithDebInfo]
 $ make -jN
 ```
 
+Currently the code only compiles with clang, issue the following `cmake` command:
+```
+$ CC=clang CXX=clang++ cmake ../ -DCMAKE_BUILD_TYPE=[Debug/Release/RelWithDebInfo]
+```
+
 After `make` there will be three executables under `build`: 
 `ermia_SI` that runs snapshot isolation (not serializable);
 `ermia_SI_SSN` that runs snapshot isolation + Serial Safety Net (serializable)

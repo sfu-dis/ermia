@@ -7,35 +7,35 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <atomic>
 #include <iostream>
 #include <string>
-#include <vector>
 #include <utility>
-#include <atomic>
+#include <vector>
 
-#include "masstree/masstree_insert.hh"
-#include "masstree/masstree_remove.hh"
-#include "masstree/masstree_scan.hh"
-#include "masstree/masstree_print.hh"
-#include "masstree/timestamp.hh"
-#include "masstree/mtcounters.hh"
-#include "masstree/circular_int.hh"
+#include "circular_int.hh"
+#include "masstree_insert.hh"
+#include "masstree_print.hh"
+#include "masstree_remove.hh"
+#include "masstree_scan.hh"
+#include "mtcounters.hh"
+#include "timestamp.hh"
 
 #include "../dbcore/sm-alloc.h"
 #include "../dbcore/sm-index.h"
-#include "tuple.h"
+#include "../tuple.h"
 
 namespace ermia {
 
 class simple_threadinfo {
- public:
+public:
   simple_threadinfo(epoch_num e) : ts_(0), epoch_(e) {}
   class rcu_callback {
-   public:
+  public:
     virtual void operator()(simple_threadinfo &ti) = 0;
   };
 
- public:
+public:
   // XXX Correct node timstamps are needed for recovery, but for no other
   // reason.
   kvtimestamp_t operation_timestamp() const { return 0; }
@@ -47,7 +47,8 @@ class simple_threadinfo {
     return ts_;
   }
   kvtimestamp_t update_timestamp(kvtimestamp_t x, kvtimestamp_t y) const {
-    if (circular_int<kvtimestamp_t>::less(x, y)) x = y;
+    if (circular_int<kvtimestamp_t>::less(x, y))
+      x = y;
     if (circular_int<kvtimestamp_t>::less_equal(ts_, x))
       // x might be a marker timestamp; ensure result is not
       ts_ = (x | 1) + 1;
@@ -55,7 +56,8 @@ class simple_threadinfo {
   }
   void increment_timestamp() { ts_ += 2; }
   void advance_timestamp(kvtimestamp_t x) {
-    if (circular_int<kvtimestamp_t>::less(ts_, x)) ts_ = x;
+    if (circular_int<kvtimestamp_t>::less(ts_, x))
+      ts_ = x;
   }
 
   /** @brief Return a function object that calls mark(ci); relax_fence().
@@ -67,11 +69,8 @@ class simple_threadinfo {
   }
 
   class accounting_relax_fence_function {
-   public:
-    template <typename V>
-    void operator()(V) {
-      relax_fence();
-    }
+  public:
+    template <typename V> void operator()(V) { relax_fence(); }
   };
   /** @brief Return a function object that calls mark(ci); relax_fence().
    *
@@ -87,7 +86,7 @@ class simple_threadinfo {
 
   // memory allocation
   void *allocate(size_t sz, memtag) {
-    Object *obj = (Object *)MM::allocate(sz + sizeof(Object), epoch_);
+    Object *obj = (Object *)MM::allocate(sz + sizeof(Object));
     new (obj) Object(NULL_PTR, NULL_PTR, epoch_, true);
     return obj->GetPayload();
   }
@@ -96,11 +95,11 @@ class simple_threadinfo {
         fat_ptr::make((char *)p - sizeof(Object), encode_size_aligned(sz)));
   }
   void deallocate_rcu(void *p, size_t sz, memtag m) {
-    deallocate(p, sz, m);  // FIXME(tzwang): add rcu callback support
+    deallocate(p, sz, m); // FIXME(tzwang): add rcu callback support
   }
   void rcu_register(rcu_callback *cb) { MARK_REFERENCED(cb); }
 
- private:
+private:
   mutable kvtimestamp_t ts_;
   epoch_num epoch_;
 };
@@ -115,13 +114,14 @@ struct masstree_single_threaded_params : public masstree_params {
   static constexpr bool concurrent = false;
 };
 
-template <typename P>
-class mbtree {
- public:
+template <typename P> class mbtree {
+public:
   typedef Masstree::node_base<P> node_base_type;
   typedef Masstree::internode<P> internode_type;
   typedef Masstree::leaf<P> leaf_type;
   typedef Masstree::leaf<P> node_type;
+  typedef Masstree::basic_table<P> basic_table_type;
+  typedef Masstree::unlocked_tcursor<P> unlocked_tcursor_type;
   typedef typename node_base_type::nodeversion_type nodeversion_type;
 
   typedef varstr key_type;
@@ -144,7 +144,7 @@ class mbtree {
     insert_info_t() : node(NULL), old_version(0), new_version(0) {}
   };
 
-  void invariant_checker() {}  // stub for now
+  void invariant_checker() {} // stub for now
 
   mbtree() {
     threadinfo ti(0);
@@ -171,6 +171,7 @@ class mbtree {
     table_.set_pdest_array(pdest_array_);
   }
 
+  inline Masstree::basic_table<P> *get_table() { return &table_; }
   inline IndexDescriptor *get_descriptor() { return descriptor_; }
   inline bool is_primary_idx() { return is_primary_idx_; }
 
@@ -189,7 +190,7 @@ class mbtree {
   /** NOTE: the public interface assumes that the caller has taken care
    * of setting up RCU */
 
-  inline bool search(const key_type &k, OID &o, dbtuple *&v, TXN::xid_context *xc,
+  inline bool search(const key_type &k, OID &o, epoch_num e,
                      versioned_node_t *search_info = nullptr) const;
 
   /**
@@ -204,7 +205,7 @@ class mbtree {
    *implementation.
    */
   class low_level_search_range_callback {
-   public:
+  public:
     virtual ~low_level_search_range_callback() {}
 
     /**
@@ -226,9 +227,8 @@ class mbtree {
    *
 
    * This function by default provides a weakly consistent view of the b-tree.
-   For
-   * instance, consider the following tree, where n = 3 is the max number of
-   * keys in a node:
+   * For instance, consider the following tree, where n = 3 is the max number
+   * of keys in a node:
    *
    *              [D|G]
    *             /  |  \
@@ -249,7 +249,7 @@ class mbtree {
    * The weakly consistent guarantee provided is the following: all keys
    * which, at the time of invocation, are known to exist in the btree
    * will be discovered on a scan (provided the key falls within the scan's
-   range),
+   * range),
    * and provided there are no concurrent modifications/removals of that key
    *
    * Note that scans within a single node are consistent
@@ -274,12 +274,25 @@ class mbtree {
                           low_level_search_range_callback &callback,
                           TXN::xid_context *xc) const;
 
+  int search_range_oid(const key_type &lower, const key_type *upper,
+                       low_level_search_range_callback &callback,
+                       TXN::xid_context *xc) const;
+
+  int rsearch_range_oid(const key_type &upper, const key_type *lower,
+                        low_level_search_range_callback &callback,
+                        TXN::xid_context *xc) const;
+
   class search_range_callback : public low_level_search_range_callback {
-   public:
-    virtual void on_resp_node(const node_opaque_t *n, uint64_t version) {}
+  public:
+    virtual void on_resp_node(const node_opaque_t *n, uint64_t version) {
+      MARK_REFERENCED(n);
+      MARK_REFERENCED(version);
+    }
 
     virtual bool invoke(const string_type &k, value_type v,
                         const node_opaque_t *n, uint64_t version) {
+      MARK_REFERENCED(n);
+      MARK_REFERENCED(version);
       return invoke(k, v);
     }
 
@@ -349,7 +362,7 @@ class mbtree {
    * the previous values are not valid and should be discarded.
    */
   class tree_walk_callback {
-   public:
+  public:
     virtual ~tree_walk_callback() {}
     virtual void on_node_begin(const node_opaque_t *n) = 0;
     virtual void on_node_success() = 0;
@@ -373,8 +386,8 @@ class mbtree {
   }
 
   // [value, has_suffix]
-  static std::vector<std::pair<value_type, bool>> ExtractValues(
-      const node_opaque_t *n);
+  static std::vector<std::pair<value_type, bool>>
+  ExtractValues(const node_opaque_t *n);
 
   /**
    * Not well defined if n is being concurrently modified, just for debugging
@@ -387,7 +400,7 @@ class mbtree {
 
   static inline size_t LeafNodeSize() { return sizeof(leaf_type); }
 
- private:
+private:
   Masstree::basic_table<P> table_;
   oid_array *pdest_array_;
   oid_array *tuple_array_;
@@ -396,24 +409,24 @@ class mbtree {
 
   static leaf_type *leftmost_descend_layer(node_base_type *n);
   class size_walk_callback;
-  template <bool Reverse>
-  class search_range_scanner_base;
-  template <bool Reverse>
-  class low_level_search_range_scanner;
-  template <typename F>
-  class low_level_search_range_callback_wrapper;
+  template <bool Reverse> class search_range_scanner_base;
+  template <bool Reverse> class no_callback_search_range_scanner;
+  template <bool Reverse> class low_level_search_range_scanner;
+  template <typename F> class low_level_search_range_callback_wrapper;
 };
 
 template <typename P>
-typename mbtree<P>::leaf_type *mbtree<P>::leftmost_descend_layer(
-    node_base_type *n) {
+typename mbtree<P>::leaf_type *
+mbtree<P>::leftmost_descend_layer(node_base_type *n) {
   node_base_type *cur = n;
   while (true) {
-    if (cur->isleaf()) return static_cast<leaf_type *>(cur);
+    if (cur->isleaf())
+      return static_cast<leaf_type *>(cur);
     internode_type *in = static_cast<internode_type *>(cur);
     nodeversion_type version = cur->stable();
     node_base_type *child = in->child_[0];
-    if (unlikely(in->has_changed(version))) continue;
+    if (unlikely(in->has_changed(version)))
+      continue;
     cur = child;
   }
 }
@@ -455,7 +468,7 @@ void mbtree<P>::tree_walk(tree_walk_callback &callback) const {
 
 template <typename P>
 class mbtree<P>::size_walk_callback : public tree_walk_callback {
- public:
+public:
   size_walk_callback() : size_(0) {}
   virtual void on_node_begin(const node_opaque_t *n);
   virtual void on_node_success();
@@ -469,42 +482,34 @@ void mbtree<P>::size_walk_callback::on_node_begin(const node_opaque_t *n) {
   auto perm = n->permutation();
   node_size_ = 0;
   for (int i = 0; i != perm.size(); ++i)
-    if (!n->is_layer(perm[i])) ++node_size_;
+    if (!n->is_layer(perm[i]))
+      ++node_size_;
 }
 
-template <typename P>
-void mbtree<P>::size_walk_callback::on_node_success() {
+template <typename P> void mbtree<P>::size_walk_callback::on_node_success() {
   size_ += node_size_;
 }
 
-template <typename P>
-void mbtree<P>::size_walk_callback::on_node_failure() {}
+template <typename P> void mbtree<P>::size_walk_callback::on_node_failure() {}
 
-template <typename P>
-inline size_t mbtree<P>::size() const {
+template <typename P> inline size_t mbtree<P>::size() const {
   size_walk_callback c;
   tree_walk(c);
   return c.size_;
 }
 
 template <typename P>
-inline bool mbtree<P>::search(const key_type &k, OID &o, dbtuple *&v,
-                              TXN::xid_context *xc,
+inline bool mbtree<P>::search(const key_type &k, OID &o, epoch_num e,
                               versioned_node_t *search_info) const {
-  threadinfo ti(xc->begin_epoch);
+  threadinfo ti(e);
   Masstree::unlocked_tcursor<P> lp(table_, k.data(), k.size());
   bool found = lp.find_unlocked(ti);
   if (found) {
     o = lp.value();
-    if (config::is_backup_srv()) {
-      v = oidmgr->BackupGetVersion(tuple_array_, pdest_array_, o, xc);
-    } else {
-      v = oidmgr->oid_get_version(tuple_array_, o, xc);
-    }
-    if (!v) found = false;
   }
-  if (search_info)
+  if (search_info) {
     *search_info = versioned_node_t(lp.node(), lp.full_version_value());
+  }
   return found;
 }
 
@@ -514,8 +519,10 @@ inline bool mbtree<P>::insert(const key_type &k, OID o, TXN::xid_context *xc,
   threadinfo ti(xc->begin_epoch);
   Masstree::tcursor<P> lp(table_, k.data(), k.size());
   bool found = lp.find_insert(ti);
-  if (!found) ti.advance_timestamp(lp.node_timestamp());
-  if (found && old_oid) *old_oid = lp.value();
+  if (!found)
+    ti.advance_timestamp(lp.node_timestamp());
+  if (found && old_oid)
+    *old_oid = lp.value();
   lp.value() = o;
   if (insert_info) {
     insert_info->node = lp.node();
@@ -586,7 +593,7 @@ inline bool mbtree<P>::remove(const key_type &k, TXN::xid_context *xc,
 template <typename P>
 template <bool Reverse>
 class mbtree<P>::search_range_scanner_base {
- public:
+public:
   search_range_scanner_base(const key_type *boundary)
       : boundary_(boundary), boundary_compar_(false) {}
   void check(const Masstree::scanstackelt<P> &iter,
@@ -604,11 +611,12 @@ class mbtree<P>::search_range_scanner_base {
             boundary_->slice_at(key.prefix_length()) <= last_ikey;
       }
     } else {
-      if (cmp >= 0) boundary_compar_ = true;
+      if (cmp >= 0)
+        boundary_compar_ = true;
     }
   }
 
- protected:
+protected:
   const key_type *boundary_;
   bool boundary_compar_;
 };
@@ -617,19 +625,19 @@ template <typename P>
 template <bool Reverse>
 class mbtree<P>::low_level_search_range_scanner
     : public search_range_scanner_base<Reverse> {
- public:
+public:
   low_level_search_range_scanner(const mbtree<P> *btr_ptr,
                                  const key_type *boundary,
                                  low_level_search_range_callback &callback)
-      : search_range_scanner_base<Reverse>(boundary),
-        callback_(callback),
+      : search_range_scanner_base<Reverse>(boundary), callback_(callback),
         btr_ptr_(btr_ptr) {}
   void visit_leaf(const Masstree::scanstackelt<P> &iter,
                   const Masstree::key<uint64_t> &key, threadinfo &) {
     this->n_ = iter.node();
     this->v_ = iter.full_version_value();
     callback_.on_resp_node(this->n_, this->v_);
-    if (this->boundary_) this->check(iter, key);
+    if (this->boundary_)
+      this->check(iter, key);
   }
   bool visit_value(const Masstree::key<uint64_t> &key, dbtuple *value) {
     if (this->boundary_compar_) {
@@ -641,8 +649,17 @@ class mbtree<P>::low_level_search_range_scanner
     return callback_.invoke(this->btr_ptr_, key.full_string(), value, this->n_,
                             this->v_);
   }
+  bool visit_oid(const Masstree::key<uint64_t> &key, OID oid) {
+    if (this->boundary_compar_) {
+      lcdf::Str bs(this->boundary_->data(), this->boundary_->size());
+      if ((!Reverse && bs <= key.full_string()) ||
+          (Reverse && bs >= key.full_string()))
+        return false;
+    }
+    return callback_.invoke(key.full_string(), oid, this->v_);
+  }
 
- private:
+private:
   Masstree::leaf<P> *n_;
   uint64_t v_;
   low_level_search_range_callback &callback_;
@@ -653,36 +670,65 @@ template <typename P>
 template <typename F>
 class mbtree<P>::low_level_search_range_callback_wrapper
     : public mbtree<P>::low_level_search_range_callback {
- public:
+public:
   low_level_search_range_callback_wrapper(F &callback) : callback_(callback) {}
 
-  void on_resp_node(const node_opaque_t *n, uint64_t version) override {}
+  void on_resp_node(const node_opaque_t *n, uint64_t version) override {
+    MARK_REFERENCED(n);
+    MARK_REFERENCED(version);
+  }
 
   bool invoke(const string_type &k, OID o, dbtuple *v, const node_opaque_t *n,
               uint64_t version) override {
+    MARK_REFERENCED(n);
+    MARK_REFERENCED(version);
     return callback_(k, o, v);
   }
 
- private:
+private:
   F &callback_;
 };
 
 template <typename P>
-inline void mbtree<P>::search_range_call(
-    const key_type &lower, const key_type *upper,
-    low_level_search_range_callback &callback, TXN::xid_context *xc) const {
+inline void
+mbtree<P>::search_range_call(const key_type &lower, const key_type *upper,
+                             low_level_search_range_callback &callback,
+                             TXN::xid_context *xc) const {
   low_level_search_range_scanner<false> scanner(this, upper, callback);
   threadinfo ti(xc->begin_epoch);
   table_.scan(lcdf::Str(lower.data(), lower.size()), true, scanner, xc, ti);
 }
 
 template <typename P>
-inline void mbtree<P>::rsearch_range_call(
-    const key_type &upper, const key_type *lower,
-    low_level_search_range_callback &callback, TXN::xid_context *xc) const {
+inline void
+mbtree<P>::rsearch_range_call(const key_type &upper, const key_type *lower,
+                              low_level_search_range_callback &callback,
+                              TXN::xid_context *xc) const {
   low_level_search_range_scanner<true> scanner(this, lower, callback);
   threadinfo ti(xc->begin_epoch);
   table_.rscan(lcdf::Str(upper.data(), upper.size()), true, scanner, xc, ti);
+}
+
+template <typename P>
+inline int
+mbtree<P>::search_range_oid(const key_type &lower, const key_type *upper,
+                            low_level_search_range_callback &callback,
+                            TXN::xid_context *xc) const {
+  low_level_search_range_scanner<false> scanner(this, upper, callback);
+  threadinfo ti(xc->begin_epoch);
+  return table_.scan_oid(lcdf::Str(lower.data(), lower.size()), true, scanner,
+                         xc, ti);
+}
+
+template <typename P>
+inline int
+mbtree<P>::rsearch_range_oid(const key_type &upper, const key_type *lower,
+                             low_level_search_range_callback &callback,
+                             TXN::xid_context *xc) const {
+  low_level_search_range_scanner<true> scanner(this, lower, callback);
+  threadinfo ti(xc->begin_epoch);
+  return table_.rscan_oid(lcdf::Str(upper.data(), upper.size()), true, scanner,
+                          xc, ti);
 }
 
 template <typename P>
@@ -727,11 +773,8 @@ mbtree<P>::ExtractValues(const node_opaque_t *n) {
   return ret;
 }
 
-template <typename P>
-void mbtree<P>::print() {
-  table_.print();
-}
+template <typename P> void mbtree<P>::print() { table_.print(); }
 
-typedef mbtree<masstree_params> concurrent_btree;
-typedef mbtree<masstree_single_threaded_params> single_threaded_btree;
-}  // namespace ermia
+typedef mbtree<masstree_params> ConcurrentMasstree;
+typedef mbtree<masstree_single_threaded_params> SingleThreadedMasstree;
+} // namespace ermia

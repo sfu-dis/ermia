@@ -265,26 +265,21 @@
 /* Define WORDS_BIGENDIAN to 1 if your processor stores words with the most
    significant byte first (like Motorola and SPARC, unlike Intel). */
 #if defined AC_APPLE_UNIVERSAL_BUILD
-#if defined __BIG_ENDIAN__
-#define WORDS_BIGENDIAN 1
-#endif
+# if defined __BIG_ENDIAN__
+#  define WORDS_BIGENDIAN 1
+# endif
 #else
-#ifndef WORDS_BIGENDIAN
+# ifndef WORDS_BIGENDIAN
 /* #  undef WORDS_BIGENDIAN */
-#endif
+# endif
 #endif
 
 /* Define if WORDS_BIGENDIAN has been set. */
 #define WORDS_BIGENDIAN_SET 1
 
 /** @brief Assert macro that always runs. */
-extern void fail_always_assert(const char* file, int line,
-                               const char* assertion, const char* message = 0)
-    __attribute__((noreturn));
-#define always_assert(x, ...)                                            \
-  do {                                                                   \
-    if (!(x)) fail_always_assert(__FILE__, __LINE__, #x, ##__VA_ARGS__); \
-  } while (0)
+extern void fail_always_assert(const char* file, int line, const char* assertion, const char* message = 0) __attribute__((noreturn));
+#define always_assert(x, ...) do { if (!(x)) fail_always_assert(__FILE__, __LINE__, #x, ## __VA_ARGS__); } while (0)
 #define mandatory_assert always_assert
 
 /** @brief Assert macro for invariants.
@@ -295,9 +290,7 @@ extern void fail_masstree_invariant(const char* file, int line, const char* asse
 #if (!defined(ENABLE_INVARIANTS) && ENABLE_ASSERTIONS) || ENABLE_INVARIANTS
 #define masstree_invariant(x, ...) do { if (!(x)) fail_masstree_invariant(__FILE__, __LINE__, #x, ## __VA_ARGS__); } while (0)
 #else
-#define masstree_invariant(x, ...) \
-  do {                             \
-  } while (0)
+#define masstree_invariant(x, ...) do { } while (0)
 #endif
 
 /** @brief Assert macro for preconditions.
@@ -308,9 +301,7 @@ extern void fail_masstree_precondition(const char* file, int line, const char* a
 #if (!defined(ENABLE_PRECONDITIONS) && ENABLE_ASSERTIONS) || ENABLE_PRECONDITIONS
 #define masstree_precondition(x, ...) do { if (!(x)) fail_masstree_precondition(__FILE__, __LINE__, #x, ## __VA_ARGS__); } while (0)
 #else
-#define masstree_precondition(x, ...) \
-  do {                                \
-  } while (0)
+#define masstree_precondition(x, ...) do { } while (0)
 #endif
 
 #ifndef invariant

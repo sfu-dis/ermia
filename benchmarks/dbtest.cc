@@ -18,11 +18,13 @@
 // Options that are shared by the primary and backup servers
 DEFINE_bool(htt, true, "Whether the HW has hyper-threading enabled."
   "Ignored if auto-detection of physical cores succeeded.");
+DEFINE_bool(physical_workers_only, true, "Whether to only use one thread per physical core as transaction workers.");
 DEFINE_bool(verbose, true, "Verbose mode.");
 DEFINE_string(benchmark, "tpcc", "Benchmark name: tpcc, tpce, or ycsb");
 DEFINE_string(benchmark_options, "", "Benchmark-specific opetions.");
 DEFINE_uint64(threads, 1, "Number of worker threads to run transactions.");
 DEFINE_uint64(node_memory_gb, 12, "GBs of memory to allocate per node.");
+DEFINE_bool(numa_spread, false, "Whether to pin threads in spread mode (compact if false)");
 DEFINE_string(tmpfs_dir, "/dev/shm",
               "Path to a tmpfs location. Used by log buffer.");
 DEFINE_string(log_data_dir, "/tmpfs/ermia-log", "Log directory.");
@@ -155,13 +157,20 @@ int main(int argc, char **argv) {
 
   google::InitGoogleLogging(argv[0]);
   google::ParseCommandLineFlags(&argc, &argv, true);
-
+  
+  ermia::config::benchmark = FLAGS_benchmark;
   ermia::config::state = ermia::config::kStateLoading;
   ermia::config::print_cpu_util = FLAGS_print_cpu_util;
   ermia::config::htt_is_on = FLAGS_htt;
+  ermia::config::physical_workers_only = FLAGS_physical_workers_only;
+  if (ermia::config::physical_workers_only) {
+    ermia::config::threads = FLAGS_threads;
+  } else {
+    ermia::config::threads = (FLAGS_threads + 1) / 2;
+  }
   ermia::config::verbose = FLAGS_verbose;
   ermia::config::node_memory_gb = FLAGS_node_memory_gb;
-  ermia::config::threads = FLAGS_threads;
+  ermia::config::numa_spread = FLAGS_numa_spread;
   ermia::config::tmpfs_dir = FLAGS_tmpfs_dir;
   ermia::config::log_dir = FLAGS_log_data_dir;
   ermia::config::log_segment_mb = FLAGS_log_segment_mb;
@@ -237,7 +246,7 @@ int main(int argc, char **argv) {
 
     ermia::config::replay_threads = FLAGS_replay_threads;
     LOG_IF(FATAL, ermia::config::threads < ermia::config::replay_threads);
-    ermia::config::worker_threads = ermia::config::threads - ermia::config::replay_threads;
+    ermia::config::worker_threads = FLAGS_threads - FLAGS_replay_threads;
 
     ermia::RCU::rcu_register();
     ALWAYS_ASSERT(ermia::config::log_dir.size());
@@ -320,7 +329,7 @@ int main(int argc, char **argv) {
   std::cerr << "  read opt threshold     : 0x" << std::hex
        << ermia::config::ssn_read_opt_threshold << std::dec << std::endl;
 #endif
-#elif defined(MVOCC)
+#elif defined(MVCC)
   std::cerr << "MVOCC";
 #else
   std::cerr << "SI";
@@ -330,8 +339,10 @@ int main(int argc, char **argv) {
 
   std::cerr << "Settings and properties" << std::endl;
   std::cerr << "  node-memory       : " << ermia::config::node_memory_gb << "GB" << std::endl;
-  std::cerr << "  num-threads       : " << ermia::config::worker_threads << std::endl;
+  std::cerr << "  num-threads       : " << ermia::config::threads << std::endl;
   std::cerr << "  numa-nodes        : " << ermia::config::numa_nodes << std::endl;
+  std::cerr << "  numa-mode         : " << (ermia::config::numa_spread ? "spread" : "compact") << std::endl;
+  std::cerr << "  physical-workers-only: " << ermia::config::physical_workers_only << std::endl;
   std::cerr << "  benchmark         : " << FLAGS_benchmark << std::endl;
 #ifdef USE_VARINT_ENCODING
   std::cerr << "  var-encode        : yes" << std::endl;
@@ -350,9 +361,9 @@ int main(int argc, char **argv) {
   std::cerr << "  command-log       : " << ermia::config::command_log << std::endl;
   std::cerr << "  command-logbuf    : " << ermia::config::command_log_buffer_mb << "MB" << std::endl;
 
-  std::cerr << "  btree_internal_node_size: " << ermia::concurrent_btree::InternalNodeSize()
+  std::cerr << "  masstree_internal_node_size: " << ermia::ConcurrentMasstree::InternalNodeSize()
        << std::endl;
-  std::cerr << "  btree_leaf_node_size    : " << ermia::concurrent_btree::LeafNodeSize()
+  std::cerr << "  masstree_leaf_node_size    : " << ermia::ConcurrentMasstree::LeafNodeSize()
        << std::endl;
   std::cerr << "  read_view_stat_interval : " << ermia::config::read_view_stat_interval_ms
        << "ms" << std::endl;
@@ -406,19 +417,24 @@ int main(int argc, char **argv) {
 
   // Must have everything in config ready by this point
   ermia::config::sanity_check();
-  ermia::Database *db = NULL;
-  db = new ermia::Database();
-  void (*test_fn)(ermia::Database *, int argc, char **argv) = NULL;
+  ermia::Engine *db = NULL;
+  db = new ermia::Engine();
+  void (*test_fn)(ermia::Engine*, int argc, char **argv) = NULL;
   if (FLAGS_benchmark == "ycsb") {
     test_fn = ycsb_do_test;
   } else if (FLAGS_benchmark == "tpcc") {
     test_fn = tpcc_do_test;
-  } else if (FLAGS_benchmark == "tpce") {
-    test_fn = tpce_do_test;
+  //} else if (FLAGS_benchmark == "tpce") {
+  //  test_fn = tpce_do_test;
   } else {
     LOG(FATAL) << "Invalid benchmark: " << FLAGS_benchmark;
   }
 
+  // FIXME(tzwang): the current thread doesn't belong to the thread pool, and
+  // it could be on any node. But not all nodes will be used by benchmark
+  // (i.e., config::numa_nodes) and so not all nodes will have memory pool. So
+  // here run on the first NUMA node to ensure we got a place to allocate memory
+  numa_run_on_node(0);
   test_fn(db, argc, new_argv);
   delete db;
   return 0;

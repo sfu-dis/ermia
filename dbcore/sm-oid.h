@@ -35,7 +35,7 @@ struct oid_array {
 
   /* How much space is required for an array with [n] entries?
    */
-  static constexpr size_t alloc_size(size_t n = MAX_ENTRIES) {
+  static size_t alloc_size(size_t n = MAX_ENTRIES) {
     return OFFSETOF(oid_array, _entries[n]);
   }
 
@@ -115,7 +115,7 @@ struct sm_oid_mgr {
      returns, but will only be reachable if the checkpoint
      transaction commits and its location is properly recorded.
    */
-  void PrimaryTakeChkpt(uint64_t chkpt_start_lsn);
+  void PrimaryTakeChkpt();
 
   /* Create a new file and return its FID. If [needs_alloc]=true,
      the new file will be managed by an allocator and its FID can be
@@ -181,6 +181,12 @@ struct sm_oid_mgr {
 
   dbtuple *oid_get_version(FID f, OID o, TXN::xid_context *visitor_xc);
   dbtuple *oid_get_version(oid_array *oa, OID o, TXN::xid_context *visitor_xc);
+
+  void oid_get_version_backup(fat_ptr &ptr,
+                              fat_ptr &tentative_next,
+                              Object *prev_obj,
+                              Object *&cur_obj,
+                              TXN::xid_context *visitor_xc);
 
   /* Return the latest visible version, for backups only. Check first the pedest
    * array and install new Objects on the tuple array if needed.

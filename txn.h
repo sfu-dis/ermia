@@ -3,13 +3,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#include <map>
 #include <vector>
-#include <string>
-#include <utility>
-#include <stdexcept>
-#include <limits>
-#include <unordered_set>
 
 #include "dbcore/xid.h"
 #include "dbcore/sm-config.h"
@@ -17,7 +11,7 @@
 #include "dbcore/sm-log.h"
 #include "dbcore/sm-object.h"
 #include "dbcore/sm-rc.h"
-#include "masstree_btree.h"
+#include "masstree/masstree_btree.h"
 #include "macros.h"
 #include "str_arena.h"
 #include "tuple.h"
@@ -54,14 +48,11 @@ struct write_set_t {
   inline write_record_t &operator[](uint32_t idx) { return entries[idx]; }
 };
 
-// forward decl
-class base_txn_btree;
-
 class transaction {
-  friend class base_txn_btree;
+  friend class ConcurrentMasstreeIndex;
   friend class sm_oid_mgr;
 
- public:
+public:
   typedef TXN::txn_state txn_state;
 
 #if defined(SSN) || defined(SSI) || defined(MVOCC)
@@ -87,26 +78,22 @@ class transaction {
   inline bool is_read_mostly() { return flags & TXN_FLAG_READ_MOSTLY; }
   inline bool is_read_only() { return flags & TXN_FLAG_READ_ONLY; }
 
- protected:
+protected:
   inline txn_state state() const { return xc->state; }
 
-  // only fires during invariant checking
-  inline void ensure_active() {
-    volatile_write(xc->state, TXN::TXN_ACTIVE);
-    ASSERT(state() == TXN::TXN_ACTIVE);
-  }
-  // the absent set is a mapping from (btree_node -> version_number).
-  struct absent_record_t {
-    uint64_t version;
-  };
-  typedef dense_hash_map<const concurrent_btree::node_opaque_t *,
-                         absent_record_t> absent_set_map;
-  absent_set_map absent_set;
+  // the absent set is a mapping from (masstree node -> version_number).
+  typedef dense_hash_map<const ConcurrentMasstree::node_opaque_t *, uint64_t > MasstreeAbsentSet;
+  MasstreeAbsentSet masstree_absent_set;
 
  public:
   transaction(uint64_t flags, str_arena &sa);
   ~transaction();
   void initialize_read_write();
+
+  inline void ensure_active() {
+    volatile_write(xc->state, TXN::TXN_ACTIVE);
+    ASSERT(state() == TXN::TXN_ACTIVE);
+  }
 
   rc_t commit();
 #ifdef SSN
@@ -122,34 +109,49 @@ class transaction {
   rc_t si_commit();
 #endif
 
-  bool check_phantom();
-  void abort_impl();
+  bool MasstreeCheckPhantom();
+  void Abort();
 
- protected:
-  bool try_insert_new_tuple(concurrent_btree *btr, const varstr *key,
-                            varstr *value, OID *inserted_oid);
+  OID PrepareInsert(OrderedIndex *index, varstr *value, dbtuple **out_tuple);
+  void FinishInsert(OrderedIndex *index, OID oid, const varstr *key, varstr *value, dbtuple *tuple);
+  bool TryInsertNewTuple(OrderedIndex *index, const varstr *key,
+                         varstr *value, OID *inserted_oid);
 
-  // reads the contents of tuple into v
-  // within this transaction context
-  rc_t do_tuple_read(dbtuple *tuple, varstr *out_v);
-  rc_t do_node_read(const typename concurrent_btree::node_opaque_t *n,
-                    uint64_t version);
+  rc_t Update(IndexDescriptor *index_desc, OID oid, const varstr *k, varstr *v);
 
  public:
+  // Reads the contents of tuple into v within this transaction context
+  rc_t DoTupleRead(dbtuple *tuple, varstr *out_v);
+
   // expected public overrides
 
   inline str_arena &string_allocator() { return *sa; }
 
+#if defined(SSN) || defined(SSI) || defined(MVOCC)
+  inline read_set_t &GetReadSet() {
+    thread_local read_set_t read_set;
+    return read_set;
+  }
+#endif
+
+  inline write_set_t &GetWriteSet() {
+    thread_local write_set_t write_set;
+    return write_set;
+  }
+
   inline void add_to_write_set(fat_ptr *entry) {
 #ifndef NDEBUG
+    auto &write_set = GetWriteSet();
     for (uint32_t i = 0; i < write_set.size(); ++i) {
       auto &w = write_set[i];
       ASSERT(w.entry);
       ASSERT(w.entry != entry);
     }
 #endif
-    write_set.emplace_back(entry);
+    GetWriteSet().emplace_back(entry);
   }
+
+  inline TXN::xid_context *GetXIDContext() { return xc; }
 
  protected:
   const uint64_t flags;
@@ -157,10 +159,6 @@ class transaction {
   TXN::xid_context *xc;
   sm_tx_log *log;
   str_arena *sa;
-  write_set_t &write_set;
-#if defined(SSN) || defined(SSI) || defined(MVOCC)
-  read_set_t *read_set;
-#endif
 };
 
 }  // namespace ermia

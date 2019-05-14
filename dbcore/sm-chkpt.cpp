@@ -58,7 +58,7 @@ void sm_chkpt_mgr::do_chkpt() {
     return;
   }
   prepare_file(cstart);
-  oidmgr->PrimaryTakeChkpt(cstart.offset());
+  oidmgr->PrimaryTakeChkpt();
   // FIXME (tzwang): originally we should put info about the chkpt
   // in a log record and then commit that sys transaction that's
   // responsible for doing chkpt. But that would interfere with
@@ -190,7 +190,8 @@ void sm_chkpt_mgr::do_recovery(char* chkpt_name, OID oid_partition,
     oid_array* ka = oidmgr->get_array(key_fid);
 
     // Populate the OID/key array and index
-    OrderedIndex* index = IndexDescriptor::GetIndex(key_fid);
+    // FIXME(tzwang): support other index types
+    ConcurrentMasstreeIndex* index = (ConcurrentMasstreeIndex *)IndexDescriptor::GetIndex(key_fid);
     bool is_primary = index->GetDescriptor()->IsPrimary();
     ALWAYS_ASSERT(index);
     while (1) {
@@ -204,12 +205,12 @@ void sm_chkpt_mgr::do_recovery(char* chkpt_name, OID oid_partition,
       nbytes += sizeof(uint32_t);
       ALWAYS_ASSERT(key_size);
       if (o % num_recovery_threads == oid_partition) {
-        varstr* key = (varstr*)MM::allocate(sizeof(varstr) + key_size, 0);
+        varstr* key = (varstr*)MM::allocate(sizeof(varstr) + key_size);
         new (key) varstr((char*)key + sizeof(varstr), key_size);
         memcpy((void*)key->p, read_buffer(key->l), key->l);
         ALWAYS_ASSERT(key->size());
         ALWAYS_ASSERT(
-            index->tree_.underlying_btree.insert_if_absent(*key, o, NULL, 0));
+            index->masstree_.insert_if_absent(*key, o, NULL, 0));
         if (!config::is_backup_srv()) {
           oidmgr->oid_put_new(ka, o, fat_ptr::make(key, INVALID_SIZE_CODE));
         }
@@ -230,7 +231,7 @@ void sm_chkpt_mgr::do_recovery(char* chkpt_name, OID oid_partition,
           fat_ptr pdest = fat_ptr::make((uintptr_t)nbytes, size_code,
                                         fat_ptr::ASI_CHK_FLAG);
           Object* obj =
-              (Object*)MM::allocate(decode_size_aligned(size_code), 0);
+              (Object*)MM::allocate(decode_size_aligned(size_code));
           new (obj) Object(pdest, NULL_PTR, 0, false);
           // Pin it regardless - the clsn needs to be comparable with other
           // versions
@@ -245,7 +246,7 @@ void sm_chkpt_mgr::do_recovery(char* chkpt_name, OID oid_partition,
   }
 }
 
-void sm_chkpt_mgr::recover(LSN chkpt_start, sm_log_recover_mgr* lm) {
+void sm_chkpt_mgr::recover(LSN chkpt_start) {
   util::scoped_timer t("chkpt_recovery");
   // Take the sum to make sure we have threads to to the work
   num_recovery_threads = config::worker_threads + config::replay_threads;
@@ -325,18 +326,18 @@ void sm_chkpt_mgr::recover(LSN chkpt_start, sm_log_recover_mgr* lm) {
   LOG(INFO) << "[Checkpoint] Prepared files";
 
   // Now deal with the real data, get many threads to do it in parallel
-  std::vector<thread::sm_thread*> workers;
+  std::vector<thread::Thread*> workers;
   for (uint32_t i = 0; i < num_recovery_threads; ++i) {
-    auto* t = thread::get_thread();
+    auto* t = thread::GetThread(true /* physical */);
     ALWAYS_ASSERT(t);
-    thread::sm_thread::task_t task = std::bind(&do_recovery, buf, i, nbytes);
-    t->start_task(task);
+    thread::Thread::Task task = std::bind(&do_recovery, buf, i, nbytes);
+    t->StartTask(task);
     workers.push_back(t);
   }
 
   for (auto& w : workers) {
-    w->join();
-    thread::put_thread(w);
+    w->Join();
+    thread::PutThread(w);
   }
   LOG(INFO) << "[Checkpoint] Recovered";
 }

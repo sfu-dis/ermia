@@ -258,7 +258,7 @@ struct LOG_ALIGN log_block {
   /* Compute the size of a log block containing the specified number
      of records and aggregate payload size. Replaces sizeof().
    */
-  static constexpr size_t size(uint32_t nrec, size_t payload_bytes) {
+  static size_t size(uint32_t nrec, size_t payload_bytes) {
     return OFFSETOF(log_block, records[nrec].data[payload_bytes]);
   }
 
@@ -266,7 +266,7 @@ struct LOG_ALIGN log_block {
      block as a skip record. This is used to hide external records,
      overflow blocks, and checkpoint commit records from scans.
    */
-  static constexpr size_t wrapped_size(uint32_t nrec, size_t payload_bytes) {
+  static size_t wrapped_size(uint32_t nrec, size_t payload_bytes) {
     return size(0, size(nrec, payload_bytes));
   }
 
@@ -374,7 +374,7 @@ struct LOG_ALIGN log_request {
 /* The smallest meaningful log block carries no payload. Like all log
    blocks, however, it ends with a skip record.
  */
-static size_t const MIN_LOG_BLOCK_SIZE = log_block::size(0, 0);
+static size_t const MIN_LOG_BLOCK_SIZE = OFFSETOF(log_block, records[0].data[0]);
 
 /* Format a skip record.
 

@@ -27,11 +27,11 @@ namespace ermia {
 uint64_t sm_log_alloc_mgr::commit_queue::total_latency_us = 0;
 
 void sm_log_alloc_mgr::set_tls_lsn_offset(uint64_t offset) {
-  volatile_write(_tls_lsn_offset[thread::my_id()], offset);
+  volatile_write(_tls_lsn_offset[thread::MyId()], offset);
 }
 
 uint64_t sm_log_alloc_mgr::get_tls_lsn_offset() {
-  return volatile_read(_tls_lsn_offset[thread::my_id()]);
+  return volatile_read(_tls_lsn_offset[thread::MyId()]);
 }
 
 /* We have to find the end of the log files on disk before
@@ -78,7 +78,7 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
 sm_log_alloc_mgr::~sm_log_alloc_mgr() {
   _write_daemon_should_stop = true;
   int err = pthread_join(_write_daemon_tid, NULL);
-  THROW_IF(err, os_error, err, "Unable to join log writer daemon thread");
+  LOG_IF(FATAL, err) << "Unable to join log writer daemon thread";
 }
 
 void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
@@ -624,7 +624,7 @@ log_allocation *sm_log_alloc_mgr::allocate(uint32_t nrec,
    yet know what segment (if any) actually contains that offset.
  */
 
-  uint64_t *my_off = &_tls_lsn_offset[thread::my_id()];
+  uint64_t *my_off = &_tls_lsn_offset[thread::MyId()];
   volatile_write(*my_off, *my_off | kDirtyTlsLsnOffset);
 
 start_over:

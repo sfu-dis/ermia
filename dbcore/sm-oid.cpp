@@ -405,7 +405,7 @@ void sm_oid_mgr::create() {
   oidmgr->dfd = dirent_iterator(config::log_dir.c_str()).dup();
 }
 
-void sm_oid_mgr::PrimaryTakeChkpt(uint64_t chkpt_start_lsn) {
+void sm_oid_mgr::PrimaryTakeChkpt() {
   ASSERT(!config::is_backup_srv());
   // Now the real work. The format of a chkpt file is:
   // [number of indexes]
@@ -845,7 +845,7 @@ retry:
       size_t sz = sizeof(Object) + sizeof(dbtuple) +
                   decode_size_aligned(ptr.size_code());
       sz = align_up(sz);
-      Object *obj = (Object *)MM::allocate(sz, 0);
+      Object *obj = (Object *)MM::allocate(sz);
       // FIXME(tzwang): figure out how GC/epoch works with this
       new (obj) Object(ptr, NULL_PTR, 0, false);  // Update next_ later
       // TODO(tzawng): allow pinning the header part only (ie the varstr
@@ -902,6 +902,63 @@ retry:
   }
 }
 
+void sm_oid_mgr::oid_get_version_backup(fat_ptr &ptr,
+                                        fat_ptr &tentative_next,
+                                        Object *prev_obj,
+                                        Object *&cur_obj,
+                                        TXN::xid_context *visitor_xc) {
+  fat_ptr prev_next_ptr = NULL_PTR;
+  Object *prev_next_obj = NULL_PTR;
+  if (prev_obj) {
+    ASSERT(prev_obj->GetClsn().offset());
+    // See if we can just follow the volatile pointer without touching the
+    // log
+    prev_next_ptr = prev_obj->GetNextVolatile();
+    prev_next_obj = (Object *)prev_next_ptr.offset();
+    ASSERT(prev_next_obj->GetClsn().offset() ==
+           prev_next_obj->GetPersistentAddress().offset());
+    if (prev_next_obj->GetClsn().offset() == prev_obj->GetNextPersistent().offset() ||
+        prev_next_obj->GetClsn().offset() >= visitor_xc->begin) {
+      // No gap or not visible
+      ptr = prev_next_ptr;
+    }
+  }
+  if (ptr.asi_type() == fat_ptr::ASI_LOG) {
+    ASSERT(ptr.size_code() != INVALID_SIZE_CODE);
+    size_t alloc_sz = align_up(decode_size_aligned(ptr.size_code()) + sizeof(Object));
+    cur_obj = (Object *)MM::allocate(alloc_sz);
+    new (cur_obj) Object(ptr, NULL_PTR, visitor_xc->begin_epoch, false);
+    cur_obj->Pin();  // After this next_pdest_ is valid
+    ASSERT(cur_obj->GetClsn().offset());
+    ASSERT(prev_obj);
+    ASSERT(prev_obj->GetClsn().offset());
+    ASSERT(prev_obj->GetClsn().offset() != cur_obj->GetClsn().offset());
+    fat_ptr vnext = prev_obj->GetNextVolatile();
+    cur_obj->SetNextVolatile(vnext);
+    fat_ptr newptr = fat_ptr::make(cur_obj, ptr.size_code(), 0);
+    if (!__sync_bool_compare_and_swap(&prev_obj->GetNextVolatilePtr()->_ptr,
+                                      vnext._ptr, newptr._ptr)) {
+      // If this CAS failed, then it must be somebody else who installed
+      // this immediate version
+      cur_obj = (Object *)prev_obj->GetNextVolatile().offset();
+      ASSERT(cur_obj);
+      ASSERT(cur_obj->GetClsn().offset() == ptr.offset());
+      ASSERT(cur_obj->GetPersistentAddress().offset() == ptr.offset());
+      MM::deallocate(newptr);
+    }
+  } else {
+    ASSERT(ptr.asi_type() == 0);
+    cur_obj = (Object *)ptr.offset();
+  }
+  ASSERT(cur_obj->GetClsn().offset());
+  ASSERT(!prev_obj || prev_obj->GetClsn().offset());
+  ASSERT(!prev_obj ||
+         prev_obj->GetClsn().offset() > cur_obj->GetClsn().offset());
+  tentative_next = cur_obj->GetNextPersistent();
+  ASSERT(tentative_next == NULL_PTR ||
+         tentative_next.asi_type() == fat_ptr::ASI_LOG);
+}
+
 // For tuple arrays only, i.e., entries are guaranteed to point to Objects.
 dbtuple *sm_oid_mgr::oid_get_version(oid_array *oa, OID o,
                                      TXN::xid_context *visitor_xc) {
@@ -931,56 +988,7 @@ start_over:
     // If this is a backup server, then must see persistent_next to find out
     // the **real** overwritten version.
     if (config::is_backup_srv() && !config::command_log) {
-      fat_ptr prev_next_ptr = NULL_PTR;
-      Object *prev_next_obj = NULL_PTR;
-      if (prev_obj) {
-        ASSERT(prev_obj->GetClsn().offset());
-        // See if we can just follow the volatile pointer without touching the
-        // log
-        prev_next_ptr = prev_obj->GetNextVolatile();
-        prev_next_obj = (Object *)prev_next_ptr.offset();
-        ASSERT(prev_next_obj->GetClsn().offset() ==
-               prev_next_obj->GetPersistentAddress().offset());
-        if (prev_next_obj->GetClsn().offset() == prev_obj->GetNextPersistent().offset() ||
-            prev_next_obj->GetClsn().offset() >= visitor_xc->begin) {
-          // No gap or not visible
-          ptr = prev_next_ptr;
-        }
-      }
-      if (ptr.asi_type() == fat_ptr::ASI_LOG) {
-        ASSERT(ptr.size_code() != INVALID_SIZE_CODE);
-        size_t alloc_sz = align_up(decode_size_aligned(ptr.size_code()) + sizeof(Object));
-        cur_obj = (Object *)MM::allocate(alloc_sz, visitor_xc->begin_epoch);
-        new (cur_obj) Object(ptr, NULL_PTR, visitor_xc->begin_epoch, false);
-        cur_obj->Pin();  // After this next_pdest_ is valid
-        ASSERT(cur_obj->GetClsn().offset());
-        ASSERT(prev_obj);
-        ASSERT(prev_obj->GetClsn().offset());
-        ASSERT(prev_obj->GetClsn().offset() != cur_obj->GetClsn().offset());
-        fat_ptr vnext = prev_obj->GetNextVolatile();
-        cur_obj->SetNextVolatile(vnext);
-        fat_ptr newptr = fat_ptr::make(cur_obj, ptr.size_code(), 0);
-        if (!__sync_bool_compare_and_swap(&prev_obj->GetNextVolatilePtr()->_ptr,
-                                          vnext._ptr, newptr._ptr)) {
-          // If this CAS failed, then it must be somebody else who installed
-          // this immediate version
-          cur_obj = (Object *)prev_obj->GetNextVolatile().offset();
-          ASSERT(cur_obj);
-          ASSERT(cur_obj->GetClsn().offset() == ptr.offset());
-          ASSERT(cur_obj->GetPersistentAddress().offset() == ptr.offset());
-          MM::deallocate(newptr);
-        }
-      } else {
-        ASSERT(ptr.asi_type() == 0);
-        cur_obj = (Object *)ptr.offset();
-      }
-      ASSERT(cur_obj->GetClsn().offset());
-      ASSERT(!prev_obj || prev_obj->GetClsn().offset());
-      ASSERT(!prev_obj ||
-             prev_obj->GetClsn().offset() > cur_obj->GetClsn().offset());
-      tentative_next = cur_obj->GetNextPersistent();
-      ASSERT(tentative_next == NULL_PTR ||
-             tentative_next.asi_type() == fat_ptr::ASI_LOG);
+      oid_get_version_backup(ptr, tentative_next, prev_obj, cur_obj, visitor_xc);
     } else {
       ASSERT(ptr.asi_type() == 0);
       cur_obj = (Object *)ptr.offset();
