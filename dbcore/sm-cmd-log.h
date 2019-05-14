@@ -7,7 +7,7 @@
 #include "sm-common.h"
 #include "sm-thread.h"
 #include "../macros.h"
-#include "../spinbarrier.h"
+#include "../util.h"
 
 namespace ermia {
 
@@ -90,9 +90,9 @@ public:
   uint32_t Size() { return buffer_size_; }
   void BackupFlush(uint64_t new_off);
   void FlushDaemon();
-  uint64_t Insert(uint32_t partition_id, uint32_t xct_type);
+  void Insert(uint32_t partition_id, uint32_t xct_type);
   inline uint64_t GetTlsOffset() {
-    return volatile_read(tls_offsets_[thread::my_id()]);
+    return volatile_read(tls_offsets_[thread::MyId()]);
   }
   inline char *GetBuffer() { return buffer_; }
   inline uint64_t DurableOffset() { return durable_offset_; }

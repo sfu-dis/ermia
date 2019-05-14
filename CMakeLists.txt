@@ -6,8 +6,8 @@ endif("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_BINARY_DIR}")
 project(ermia)
 cmake_minimum_required(VERSION 2.8)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-set(LINK_FLAGS "-libverbs -lnuma -lpthread -lrt -lglog -lgflags")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -Woverloaded-virtual -Werror=reorder -Wno-address-of-packed-member")
+set(LINK_FLAGS "-libverbs -lnuma -lpthread -pthread -lrt -lglog -lgflags")
 link_libraries(${LINK_FLAGS})
 
 # Use masstree for index
@@ -17,6 +17,7 @@ set(MASSTREE_CONFIG "--enable-max-key-len=1024 --with-malloc=malloc")
 
 if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${CMAKE_CURRENT_SOURCE_DIR}/masstree/config-debug.h")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${CMAKE_CURRENT_SOURCE_DIR}/masstree/config-release.h")
 endif()
@@ -33,11 +34,11 @@ add_subdirectory(dbcore)
 add_subdirectory(masstree)
 
 set_property(GLOBAL APPEND PROPERTY ALL_ERMIA_SRC
-  ${CMAKE_CURRENT_SOURCE_DIR}/base_txn_btree.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/ermia.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/tuple.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/txn.cc
 )
+
 get_property(LIB_ERMIA_SRC GLOBAL PROPERTY ALL_ERMIA_SRC)
 
 # SI

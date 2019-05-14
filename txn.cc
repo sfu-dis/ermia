@@ -3,29 +3,17 @@
 #include "dbcore/rcu.h"
 #include "dbcore/sm-rep.h"
 #include "dbcore/serial.h"
-
-#include <atomic>
-#include <algorithm>
-#include <iostream>
-#include <sstream>
-#include <vector>
-#include <utility>
+#include "ermia.h"
 
 namespace ermia {
 
-#if defined(SSN) || defined(SSI) || defined(MVOCC)
-static __thread transaction::read_set_t *tls_read_set;
-#endif
-
-extern write_set_t tls_write_set[config::MAX_THREADS];
-
 transaction::transaction(uint64_t flags, str_arena &sa)
-    : flags(flags), sa(&sa), write_set(tls_write_set[thread::my_id()]) {
+    : flags(flags), sa(&sa) {
   if (!(flags & TXN_FLAG_CMD_REDO) && config::is_backup_srv()) {
     // Read-only transaction on backup - grab a begin timestamp and go.
     // A read-only 'transaction' on a backup basically is reading a
     // consistent snapshot back in time. No CC involved.
-    thread_local TXN::xid_context *ctx = nullptr;
+    static thread_local TXN::xid_context *ctx = nullptr;
     if (!ctx) {
       ctx = TXN::xid_get_context(TXN::xid_alloc());
     }
@@ -41,17 +29,12 @@ transaction::transaction(uint64_t flags, str_arena &sa)
 
 void transaction::initialize_read_write() {
   if (config::phantom_prot) {
-    absent_set.set_empty_key(NULL);  // google dense map
-    absent_set.clear();
+    masstree_absent_set.set_empty_key(NULL);  // google dense map
+    masstree_absent_set.clear();
   }
-  write_set.clear();
+  GetWriteSet().clear();
 #if defined(SSN) || defined(SSI) || defined(MVOCC)
-  if (unlikely(not tls_read_set)) {
-    tls_read_set = new read_set_t;
-    tls_read_set->reserve(2000);
-  }
-  read_set = tls_read_set;
-  read_set->clear();
+  GetReadSet().clear();
 #endif
   xid = TXN::xid_alloc();
   xc = TXN::xid_get_context(xid);
@@ -90,9 +73,14 @@ void transaction::initialize_read_write() {
     xc->last_safesnap = volatile_read(MM::safesnap_lsn);
 #endif
   }
-#else
+#elif defined(MVOCC)
   RCU::rcu_enter();
   log = logmgr->new_tx_log();
+  xc->begin = logmgr->cur_lsn().offset() + 1;
+#else
+  // SI - see if it's read only. If so, skip logging etc.
+  RCU::rcu_enter();
+  log = (flags & TXN_FLAG_READ_ONLY) ? nullptr : logmgr->new_tx_log();
   xc->begin = logmgr->cur_lsn().offset() + 1;
 #endif
 }
@@ -123,7 +111,7 @@ transaction::~transaction() {
   TXN::xid_free(xid);  // must do this after epoch_exit, which uses xc.end
 }
 
-void transaction::abort_impl() {
+void transaction::Abort() {
   // Mark the dirty tuple as invalid, for oid_get_version to
   // move on more quickly.
   volatile_write(xc->state, TXN::TXN_ABRTD);
@@ -131,14 +119,16 @@ void transaction::abort_impl() {
 #if defined(SSN) || defined(SSI)
   // Go over the read set first, to deregister from the tuple
   // asap so the updater won't wait for too long.
-  for (uint32_t i = 0; i < read_set->size(); ++i) {
-    auto &r = (*read_set)[i];
+  auto &read_set = GetReadSet();
+  for (uint32_t i = 0; i < read_set.size(); ++i) {
+    auto &r = read_set[i];
     ASSERT(r->GetObject()->GetClsn().asi_type() == fat_ptr::ASI_LOG);
     // remove myself from reader list
     serial_deregister_reader_tx(&r->readers_bitmap);
   }
 #endif
 
+  auto &write_set = GetWriteSet();
   for (uint32_t i = 0; i < write_set.size(); ++i) {
     auto &w = write_set[i];
     dbtuple *tuple = (dbtuple *)w.get_object()->GetPayload();
@@ -166,26 +156,6 @@ void transaction::abort_impl() {
   }
 }
 
-namespace {
-
-inline std::string transaction_flags_to_str(uint64_t flags) {
-  bool first = true;
-  std::ostringstream oss;
-  if (flags & transaction::TXN_FLAG_LOW_LEVEL_SCAN) {
-    oss << "TXN_FLAG_LOW_LEVEL_SCAN";
-    first = false;
-  }
-  if (flags & transaction::TXN_FLAG_READ_ONLY) {
-    if (first)
-      oss << "TXN_FLAG_READ_ONLY";
-    else
-      oss << " | TXN_FLAG_READ_ONLY";
-    first = false;
-  }
-  return oss.str();
-}
-};  // end of namespace
-
 rc_t transaction::commit() {
   ALWAYS_ASSERT(state() == TXN::TXN_ACTIVE);
   volatile_write(xc->state, TXN::TXN_COMMITTING);
@@ -193,6 +163,7 @@ rc_t transaction::commit() {
   // Safe snapshot optimization for read-only transactions:
   // Use the begin ts as cstamp if it's a read-only transaction
   // This is the same for both SSN and SSI.
+  auto &write_set = GetWriteSet();
   if (config::enable_safesnap and (flags & TXN_FLAG_READ_ONLY)) {
     ASSERT(not log);
     ASSERT(write_set.size() == 0);
@@ -253,8 +224,9 @@ rc_t transaction::parallel_ssn_commit() {
 
   // Process reads first for a stable sstamp to be used for the
   // read-optimization
-  for (uint32_t i = 0; i < read_set->size(); ++i) {
-    auto &r = (*read_set)[i];
+  auto &read_set = GetReadSet();
+  for (uint32_t i = 0; i < read_set.size(); ++i) {
+    auto &r = read_set[i];
   try_get_successor:
     ASSERT(r->GetObject()->GetClsn().asi_type() == fat_ptr::ASI_LOG);
     // read tuple->slsn to a local variable before doing anything relying on it,
@@ -358,6 +330,7 @@ rc_t transaction::parallel_ssn_commit() {
     }
   }
 
+  auto &write_set = GetWriteSet();
   for (uint32_t i = 0; i < write_set.size(); ++i) {
     auto &w = write_set[i];
     dbtuple *tuple = (dbtuple *)w.get_object()->GetPayload();
@@ -565,7 +538,7 @@ rc_t transaction::parallel_ssn_commit() {
 
   if (not ssn_check_exclusion(xc)) return rc_t{RC_ABORT_SERIAL};
 
-  if (config::phantom_prot && !check_phantom()) {
+  if (config::phantom_prot && !MasstreeCheckPhantom()) {
     return rc_t{RC_ABORT_PHANTOM};
   }
 
@@ -596,7 +569,7 @@ rc_t transaction::parallel_ssn_commit() {
     auto &w = write_set[i];
     Object *object = w.get_object();
     dbtuple *tuple = (dbtuple *)object->GetPayload();
-    tuple->do_write();
+    tuple->DoWrite();
     dbtuple *next_tuple = tuple->NextVolatile();
     ASSERT(not next_tuple or (object->GetNextVolatile().offset() ==
                               (uint64_t)next_tuple->GetObject()));
@@ -630,8 +603,8 @@ rc_t transaction::parallel_ssn_commit() {
   // 3. Deregister from bitmap
   // Without 1, the updater might see a larger-than-it-should
   // xstamp and use it as its pstamp -> more unnecessary aborts
-  for (uint32_t i = 0; i < read_set->size(); ++i) {
-    auto &r = (*read_set)[i];
+  for (uint32_t i = 0; i < read_set.size(); ++i) {
+    auto &r = read_set[i];
     ASSERT(r->GetObject()->GetClsn().asi_type() == fat_ptr::ASI_LOG);
 
     // Spin to hold this position until the older successor is gone,
@@ -732,8 +705,9 @@ rc_t transaction::parallel_ssi_commit() {
   // of T3 in the dangerous structure that clobbered our read)
   uint64_t ct3 = xc->ct3;  // this will be the s2 of versions I clobbered
 
-  for (uint32_t i = 0; i < read_set->size(); ++i) {
-    auto &r = (*read_set)[i];
+  auto &read_set = GetReadSet();
+  for (uint32_t i = 0; i < read_set.size(); ++i) {
+    auto &r = read_set[i];
   get_overwriter:
     fat_ptr overwriter_clsn = volatile_read(r->sstamp);
     if (overwriter_clsn == NULL_PTR) continue;
@@ -814,6 +788,7 @@ rc_t transaction::parallel_ssi_commit() {
     // Release read lock (readers bitmap) after setting xstamp in post-commit
   }
 
+  auto &write_set = GetWriteSet();
   if (ct3) {
     // now see if I'm the unlucky T2
     for (uint32_t i = 0; i < write_set.size(); ++i) {
@@ -920,7 +895,7 @@ rc_t transaction::parallel_ssi_commit() {
     }
   }
 
-  if (config::phantom_prot && !check_phantom()) {
+  if (config::phantom_prot && !MasstreeCheckPhantom()) {
     return rc_t{RC_ABORT_PHANTOM};
   }
 
@@ -933,7 +908,7 @@ rc_t transaction::parallel_ssi_commit() {
     auto &w = write_set[i];
     Object *object = w.get_object();
     dbtuple *tuple = (dbtuple *)object->GetPayload();
-    tuple->do_write();
+    tuple->DoWrite();
     dbtuple *overwritten_tuple = tuple->NextVolatile();
 
     fat_ptr clsn_ptr = object->GenerateClsnPtr(clsn);
@@ -965,12 +940,12 @@ rc_t transaction::parallel_ssi_commit() {
   // Similar to SSN implementation, xstamp's availability depends solely
   // on when to deregister_reader_tx, not when to transitioning to the
   // "committed" state.
-  for (uint32_t i = 0; i < read_set->size(); ++i) {
-    auto &r = (*read_set)[i];
+  for (uint32_t i = 0; i < read_set.size(); ++i) {
+    auto &r = read_set[i];
     // Update xstamps in read versions, this should happen before
     // deregistering from the bitmap, so when the updater found a
     // context change, it'll get a stable xtamp from the tuple.
-    // No need to look into write set and skip: do_tuple_read will
+    // No need to look into write set and skip: DoTupleRead will
     // skip inserting to read set if it's already in write set; it's
     // possible to see a tuple in both read and write sets, only if
     // the tuple is first read, then updated - updating the xstamp
@@ -1020,13 +995,14 @@ rc_t transaction::mvocc_commit() {
     return rc_t{RC_ABORT_INTERNAL};
   }
 
-  if (config::phantom_prot && !check_phantom()) {
+  if (config::phantom_prot && !MasstreeCheckPhantom()) {
     return rc_t{RC_ABORT_PHANTOM};
   }
 
   // Just need to check read-set
-  for (uint32_t i = 0; i < read_set->size(); ++i) {
-    auto &r = (*read_set)[i];
+  auto &read_set = GetReadSet();
+  for (uint32_t i = 0; i < read_set.size(); ++i) {
+    auto &r = read_set[i];
   check_backedge:
     fat_ptr successor_clsn = volatile_read(r->sstamp);
     if (!successor_clsn.offset()) {
@@ -1090,12 +1066,13 @@ rc_t transaction::mvocc_commit() {
   // (traverse write-tuple)
   // stuff clsn in tuples in write-set
   auto clsn = xc->end;
+  auto &write_set = GetWriteSet();
   for (uint32_t i = 0; i < write_set.size(); ++i) {
     auto &w = write_set[i];
     Object *object = w.get_object();
     dbtuple *tuple = (dbtuple *)object->GetPayload();
     ASSERT(w.entry);
-    tuple->do_write();
+    tuple->DoWrite();
     dbtuple *overwritten_tuple = tuple->NextVolatile();
     fat_ptr clsn_ptr = object->GenerateClsnPtr(clsn);
     if (overwritten_tuple) {
@@ -1123,7 +1100,12 @@ rc_t transaction::mvocc_commit() {
 }
 #else
 rc_t transaction::si_commit() {
-  if (!(flags & TXN_FLAG_CMD_REDO) && config::is_backup_srv()) {
+  if ((!(flags & TXN_FLAG_CMD_REDO) && config::is_backup_srv())) {
+    return rc_t{RC_TRUE};
+  }
+
+  if (flags & TXN_FLAG_READ_ONLY) {
+    volatile_write(xc->state, TXN::TXN_CMMTD);
     return rc_t{RC_TRUE};
   }
 
@@ -1132,7 +1114,7 @@ rc_t transaction::si_commit() {
   xc->end = log->pre_commit().offset();
   if (xc->end == 0) return rc_t{RC_ABORT_INTERNAL};
 
-  if (config::phantom_prot && !check_phantom()) {
+  if (config::phantom_prot && !MasstreeCheckPhantom()) {
     return rc_t{RC_ABORT_PHANTOM};
   }
 
@@ -1142,12 +1124,14 @@ rc_t transaction::si_commit() {
   // (traverse write-tuple)
   // stuff clsn in tuples in write-set
   auto clsn = xc->end;
+  auto &write_set = GetWriteSet();
   for (uint32_t i = 0; i < write_set.size(); ++i) {
     auto &w = write_set[i];
     Object *object = w.get_object();
+    ASSERT(object);
     dbtuple *tuple = (dbtuple *)object->GetPayload();
     ASSERT(w.entry);
-    tuple->do_write();
+    tuple->DoWrite();
 
     fat_ptr clsn_ptr = object->GenerateClsnPtr(clsn);
     object->SetClsn(clsn_ptr);
@@ -1169,43 +1153,220 @@ rc_t transaction::si_commit() {
 #endif
 
 // returns true if btree versions have changed, ie there's phantom
-bool transaction::check_phantom() {
-  for (auto &r : absent_set) {
-    const uint64_t v = concurrent_btree::ExtractVersionNumber(r.first);
-    if (unlikely(v != r.second.version)) return false;
+bool transaction::MasstreeCheckPhantom() {
+  for (auto &r : masstree_absent_set) {
+    const uint64_t v = ConcurrentMasstree::ExtractVersionNumber(r.first);
+    if (unlikely(v != r.second)) return false;
   }
   return true;
 }
 
-bool transaction::try_insert_new_tuple(concurrent_btree *btr, const varstr *key,
-                                       varstr *value, OID *inserted_oid) {
-  ASSERT((char *)key->data() == (char *)key + sizeof(varstr));
-  ASSERT(key);
-  OID oid = 0;
-  IndexDescriptor *id = btr->get_descriptor();
-  bool is_primary_idx = btr->is_primary_idx();
-  auto *key_array = id->GetKeyArray();
+rc_t transaction::Update(IndexDescriptor *index_desc, OID oid, const varstr *k, varstr *v) {
+  oid_array *tuple_array = index_desc->GetTupleArray();
+  FID tuple_fid = index_desc->GetTupleFid();
+
+  // first *updater* wins
+  fat_ptr new_obj_ptr = NULL_PTR;
+  fat_ptr prev_obj_ptr =
+      oidmgr->PrimaryTupleUpdate(tuple_array, oid, v, xc, &new_obj_ptr);
+  Object *prev_obj = (Object *)prev_obj_ptr.offset();
+
+  if (prev_obj) {  // succeeded
+    dbtuple *tuple = ((Object *)new_obj_ptr.offset())->GetPinnedTuple();
+    ASSERT(tuple);
+    dbtuple *prev = prev_obj->GetPinnedTuple();
+    ASSERT((uint64_t)prev->GetObject() == prev_obj_ptr.offset());
+    ASSERT(xc);
+#ifdef SSI
+    ASSERT(prev->sstamp == NULL_PTR);
+    if (xc->ct3) {
+      // Check if we are the T2 with a committed T3 earlier than a safesnap
+      // (being T1)
+      if (xc->ct3 <= xc->last_safesnap) return {RC_ABORT_SERIAL};
+
+      if (volatile_read(prev->xstamp) >= xc->ct3 or
+          not prev->readers_bitmap.is_empty(true)) {
+        // Read-only optimization: safe if T1 is read-only (so far) and T1's
+        // begin ts
+        // is before ct3.
+        if (config::enable_ssi_read_only_opt) {
+          TXN::readers_bitmap_iterator readers_iter(&prev->readers_bitmap);
+          while (true) {
+            int32_t xid_idx = readers_iter.next(true);
+            if (xid_idx == -1) break;
+
+            XID rxid = volatile_read(TXN::rlist.xids[xid_idx]);
+            ASSERT(rxid != xc->owner);
+            if (rxid == INVALID_XID)  // reader is gone, check xstamp in the end
+              continue;
+
+            XID reader_owner = INVALID_XID;
+            uint64_t reader_begin = 0;
+            TXN::xid_context *reader_xc = NULL;
+            reader_xc = TXN::xid_get_context(rxid);
+            if (not reader_xc)  // context change, consult xstamp later
+              continue;
+
+            // copy everything before doing anything
+            reader_begin = volatile_read(reader_xc->begin);
+            reader_owner = volatile_read(reader_xc->owner);
+            if (reader_owner != rxid)  // consult xstamp later
+              continue;
+
+            // we're safe if the reader is read-only (so far) and started after
+            // ct3
+            if (reader_xc->xct->GetWriteSet().size() > 0 and
+                reader_begin <= xc->ct3) {
+              oidmgr->PrimaryTupleUnlink(tuple_array, oid);
+              return {RC_ABORT_SERIAL};
+            }
+          }
+        } else {
+          oidmgr->PrimaryTupleUnlink(tuple_array, oid);
+          return {RC_ABORT_SERIAL};
+        }
+      }
+    }
+#endif
+#ifdef SSN
+    // update hi watermark
+    // Overwriting a version could trigger outbound anti-dep,
+    // i.e., I'll depend on some tx who has read the version that's
+    // being overwritten by me. So I'll need to see the version's
+    // access stamp to tell if the read happened.
+    ASSERT(prev->sstamp == NULL_PTR);
+    auto prev_xstamp = volatile_read(prev->xstamp);
+    if (xc->pstamp < prev_xstamp) xc->pstamp = prev_xstamp;
+
+#ifdef EARLY_SSN_CHECK
+    if (not ssn_check_exclusion(xc)) {
+      // unlink the version here (note abort_impl won't be able to catch
+      // it because it's not yet in the write set)
+      oidmgr->PrimaryTupleUnlink(tuple_array, oid);
+      return rc_t{RC_ABORT_SERIAL};
+    }
+#endif
+
+    // copy access stamp to new tuple from overwritten version
+    // (no need to copy sucessor lsn (slsn))
+    volatile_write(tuple->xstamp, prev->xstamp);
+#endif
+
+    // read prev's clsn first, in case it's a committing XID, the clsn's state
+    // might change to ASI_LOG anytime
+    ASSERT((uint64_t)prev->GetObject() == prev_obj_ptr.offset());
+    fat_ptr prev_clsn = prev->GetObject()->GetClsn();
+    fat_ptr prev_persistent_ptr = NULL_PTR;
+    if (prev_clsn.asi_type() == fat_ptr::ASI_XID and
+        XID::from_ptr(prev_clsn) == xid) {
+      // updating my own updates!
+      // prev's prev: previous *committed* version
+      ASSERT(((Object *)prev_obj_ptr.offset())->GetAllocateEpoch() ==
+             xc->begin_epoch);
+      prev_persistent_ptr = prev_obj->GetNextPersistent();
+      // FIXME(tzwang): 20190210: seems the deallocation here is too early,
+      // causing readers to not find any visible version. Fix this together with
+      // GC later.
+      //MM::deallocate(prev_obj_ptr);
+    } else {  // prev is committed (or precommitted but in post-commit now) head
+#if defined(SSI) || defined(SSN) || defined(MVOCC)
+      volatile_write(prev->sstamp, xc->owner.to_ptr());
+      ASSERT(prev->sstamp.asi_type() == fat_ptr::ASI_XID);
+      ASSERT(XID::from_ptr(prev->sstamp) == xc->owner);
+      ASSERT(tuple->NextVolatile() == prev);
+#endif
+      add_to_write_set(tuple_array->get(oid));
+      prev_persistent_ptr = prev_obj->GetPersistentAddress();
+    }
+
+    ASSERT(not tuple->pvalue or tuple->pvalue->size() == tuple->size);
+    ASSERT(tuple->GetObject()->GetClsn().asi_type() == fat_ptr::ASI_XID);
+    ASSERT(oidmgr->oid_get_version(tuple_fid, oid, xc) == tuple);
+    ASSERT(log);
+
+    // FIXME(tzwang): mark deleted in all 2nd indexes as well?
+
+    // The varstr also encodes the pdest of the overwritten version.
+    // FIXME(tzwang): the pdest of the overwritten version doesn't belong to
+    // varstr. Embedding it in varstr makes it part of the payload and is
+    // helpful for digging out versions on backups. Not used by the primary.
+    bool is_delete = !v;
+    if (!v) {
+      // Get an empty varstr just to store the overwritten tuple's
+      // persistent address
+      v = string_allocator().next(0);
+      v->p = nullptr;
+      v->l = 0;
+    }
+    ASSERT(v);
+    v->ptr = prev_persistent_ptr;
+    ASSERT(v->ptr.offset() && v->ptr.asi_type() == fat_ptr::ASI_LOG);
+
+    // log the whole varstr so that recovery can figure out the real size
+    // of the tuple, instead of using the decoded (larger-than-real) size.
+    size_t data_size = v->size() + sizeof(varstr);
+    auto size_code = encode_size_aligned(data_size);
+    if (is_delete) {
+      log->log_enhanced_delete(tuple_fid, oid,
+                                 fat_ptr::make((void *)v, size_code),
+                                 DEFAULT_ALIGNMENT_BITS);
+    } else {
+      log->log_update(tuple_fid, oid, fat_ptr::make((void *)v, size_code),
+                        DEFAULT_ALIGNMENT_BITS,
+                        tuple->GetObject()->GetPersistentAddressPtr());
+
+      if (config::log_key_for_update) {
+        auto key_size = align_up(k->size() + sizeof(varstr));
+        auto key_size_code = encode_size_aligned(key_size);
+        log->log_update_key(tuple_fid, oid,
+                              fat_ptr::make((void *)k, key_size_code),
+                              DEFAULT_ALIGNMENT_BITS);
+      }
+    }
+    return rc_t{RC_TRUE};
+  } else {  // somebody else acted faster than we did
+    return rc_t{RC_ABORT_SI_CONFLICT};
+  }
+}
+
+OID transaction::PrepareInsert(OrderedIndex *index, varstr *value, dbtuple **out_tuple) {
+  IndexDescriptor *id = index->GetDescriptor();
+  bool is_primary_idx = id->IsPrimary();
   auto *tuple_array = id->GetTupleArray();
   FID tuple_fid = id->GetTupleFid();
-  dbtuple *tuple = nullptr;
+  *out_tuple = nullptr;
+  OID oid = 0;
   if (likely(is_primary_idx)) {
     fat_ptr new_head = Object::Create(value, false, xc->begin_epoch);
     ASSERT(new_head.size_code() != INVALID_SIZE_CODE);
     ASSERT(new_head.asi_type() == 0);
-    tuple = (dbtuple *)((Object *)new_head.offset())->GetPayload();
-    ASSERT(decode_size_aligned(new_head.size_code()) >= tuple->size);
-    tuple->GetObject()->SetClsn(xid.to_ptr());
+    *out_tuple = (dbtuple *)((Object *)new_head.offset())->GetPayload();
+    ASSERT(decode_size_aligned(new_head.size_code()) >= (*out_tuple)->size);
+    (*out_tuple)->GetObject()->SetClsn(xid.to_ptr());
     oid = oidmgr->alloc_oid(tuple_fid);
     oidmgr->oid_put_new(tuple_array, oid, new_head);
-    if (inserted_oid) {
-      *inserted_oid = oid;
-    }
   } else {
     // Inserting into a secondary index - just key-OID mapping is enough
     oid = *(OID *)value;  // It's actually a pointer to an OID in user space
   }
-  typename concurrent_btree::insert_info_t ins_info;
-  if (!btr->insert_if_absent(*key, oid, xc, &ins_info)) {
+  return oid;
+}
+
+bool transaction::TryInsertNewTuple(OrderedIndex *index, const varstr *key,
+                                    varstr *value, OID *inserted_oid) {
+  ASSERT((char *)key->data() == (char *)key + sizeof(varstr));
+  dbtuple *tuple = nullptr;
+  OID oid = PrepareInsert(index, value, &tuple);
+  if (inserted_oid) {
+    *inserted_oid = oid;
+  }
+  IndexDescriptor *id = index->GetDescriptor();
+  auto *tuple_array = id->GetTupleArray();
+  auto *key_array = id->GetKeyArray();
+
+  ASSERT(key);
+  bool is_primary_idx = id->IsPrimary();
+  if (!index->InsertIfAbsent(this, *key, oid)) {
     if (is_primary_idx) {
       oidmgr->PrimaryTupleUnlink(tuple_array, oid);
     }
@@ -1214,27 +1375,14 @@ bool transaction::try_insert_new_tuple(concurrent_btree *btr, const varstr *key,
     }
     return false;
   }
+  FinishInsert(index, oid, key, value, tuple);
+  return true;
+}
 
-  if (config::phantom_prot && !absent_set.empty()) {
-    // update node #s
-    ASSERT(ins_info.node);
-    auto it = absent_set.find(ins_info.node);
-    if (it != absent_set.end()) {
-      if (unlikely(it->second.version != ins_info.old_version)) {
-        // important: unlink the version, otherwise we risk leaving a dead
-        // version at chain head -> infinite loop or segfault...
-        if (likely(is_primary_idx)) {
-          oidmgr->PrimaryTupleUnlink(tuple_array, oid);
-        }
-        if (config::enable_chkpt) {
-          volatile_write(key_array->get(oid)->_ptr, 0);
-        }
-        return false;
-      }
-      // otherwise, bump the version
-      it->second.version = ins_info.new_version;
-    }
-  }
+void transaction::FinishInsert(OrderedIndex *index, OID oid, const varstr *key, varstr *value, dbtuple *tuple) {
+  IndexDescriptor *id = index->GetDescriptor();
+  auto *tuple_array = id->GetTupleArray();
+  auto *key_array = id->GetKeyArray();
 
   // Succeeded, now put the key there if we need it
   if (config::enable_chkpt) {
@@ -1242,7 +1390,7 @@ bool transaction::try_insert_new_tuple(concurrent_btree *btr, const varstr *key,
     // realistic setting here to not generate it, the purpose of skipping
     // this is solely for benchmarking CC.
     varstr *new_key =
-        (varstr *)MM::allocate(sizeof(varstr) + key->size(), xc->begin_epoch);
+        (varstr *)MM::allocate(sizeof(varstr) + key->size());
     new (new_key) varstr((char *)new_key + sizeof(varstr), 0);
     new_key->copy_from(key);
     key_array->ensure_size(oid);
@@ -1251,6 +1399,7 @@ bool transaction::try_insert_new_tuple(concurrent_btree *btr, const varstr *key,
   }
 
   // insert to log
+  bool is_primary_idx = id->IsPrimary();
   ASSERT(log);
   if (likely(tuple)) {  // Primary index, "real tuple"
     ASSERT(is_primary_idx);
@@ -1262,6 +1411,7 @@ bool transaction::try_insert_new_tuple(concurrent_btree *btr, const varstr *key,
     ASSERT(tuple->size);
     // log the whole varstr so that recovery can figure out the real size
     // of the tuple, instead of using the decoded (larger-than-real) size.
+    FID tuple_fid = id->GetTupleFid();
     log->log_insert(tuple_fid, oid, fat_ptr::make((void *)value, size_code),
                     DEFAULT_ALIGNMENT_BITS,
                     tuple->GetObject()->GetPersistentAddressPtr());
@@ -1284,10 +1434,9 @@ bool transaction::try_insert_new_tuple(concurrent_btree *btr, const varstr *key,
     ASSERT(tuple->pvalue->size() == tuple->size);
     add_to_write_set(tuple_array->get(oid));
   }
-  return true;
 }
 
-rc_t transaction::do_tuple_read(dbtuple *tuple, varstr *out_v) {
+rc_t transaction::DoTupleRead(dbtuple *tuple, varstr *out_v) {
   ASSERT(tuple);
   ASSERT(xc);
   bool read_my_own =
@@ -1315,29 +1464,12 @@ rc_t transaction::do_tuple_read(dbtuple *tuple, varstr *out_v) {
       rc = mvocc_read(tuple);
 #endif
     }
-    if (rc_is_abort(rc)) return rc;
+    if (rc.IsAbort()) return rc;
   }  // otherwise it's my own update/insert, just read it
 #endif
 
   // do the actual tuple read
-  dbtuple::ReadStatus stat = tuple->do_read(out_v, !read_my_own);
-  ASSERT(stat == dbtuple::READ_EMPTY || stat == dbtuple::READ_RECORD);
-  if (stat == dbtuple::READ_EMPTY) {
-    return rc_t{RC_FALSE};
-  }
-  return {RC_TRUE};
-}
-
-rc_t transaction::do_node_read(
-    const typename concurrent_btree::node_opaque_t *n, uint64_t v) {
-  ALWAYS_ASSERT(config::phantom_prot);
-  ASSERT(n);
-  auto it = absent_set.find(n);
-  if (it == absent_set.end())
-    absent_set[n].version = v;
-  else if (it->second.version != v)
-    return rc_t{RC_ABORT_PHANTOM};
-  return rc_t{RC_TRUE};
+  return tuple->DoRead(out_v, !read_my_own);
 }
 
 #ifdef SSN
@@ -1382,9 +1514,9 @@ rc_t transaction::ssn_read(dbtuple *tuple) {
       // successor of mine), so I need to update my \pi for the SSN check.
       // This is the easier case of anti-dependency (the other case is T1
       // already read a (then latest) version, then T2 comes to overwrite it).
-      read_set->emplace_back(tuple);
+      GetReadSet().emplace_back(tuple);
     }
-    serial_register_reader_tx(xc->owner, &tuple->readers_bitmap);
+    serial_register_reader_tx(&tuple->readers_bitmap);
   }
 
 #ifdef EARLY_SSN_CHECK
@@ -1403,7 +1535,7 @@ rc_t transaction::ssi_read(dbtuple *tuple) {
   if (volatile_read(tuple->s2)) {
     // Read-only optimization: s2 is not a problem if we're read-only and
     // my begin ts is earlier than s2.
-    if (not config::enable_ssi_read_only_opt or write_set.size() > 0 or
+    if (not config::enable_ssi_read_only_opt or GetWriteSet().size() > 0 or
         xc->begin >= tuple->s2) {
       // sstamp will be valid too if s2 is valid
       ASSERT(tuple->sstamp.asi_type() == fat_ptr::ASI_LOG);
@@ -1428,8 +1560,8 @@ rc_t transaction::ssi_read(dbtuple *tuple) {
   } else {
     // survived, register as a reader
     // After this point, I'll be visible to the updater (if any)
-    serial_register_reader_tx(xc->owner, &tuple->readers_bitmap);
-    read_set->emplace_back(tuple);
+    serial_register_reader_tx(&tuple->readers_bitmap);
+    GetReadSet().emplace_back(tuple);
   }
   return {RC_TRUE};
 }
@@ -1437,7 +1569,7 @@ rc_t transaction::ssi_read(dbtuple *tuple) {
 
 #ifdef MVOCC
 rc_t transaction::mvocc_read(dbtuple *tuple) {
-  read_set->emplace_back(tuple);
+  GetReadSet().emplace_back(tuple);
   return rc_t{RC_TRUE};
 }
 #endif

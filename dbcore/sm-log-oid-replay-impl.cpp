@@ -9,8 +9,9 @@
 
 namespace ermia {
 
-LSN parallel_oid_replay::operator()(void *arg, sm_log_scan_mgr *s, LSN from,
-                                     LSN to) {
+LSN parallel_oid_replay::operator()(void *arg, sm_log_scan_mgr *s,
+                                    LSN from, LSN to) {
+  MARK_REFERENCED(arg);
   //util::scoped_timer t("parallel_oid_replay");
   scanner = s;
   start_lsn = from;
@@ -52,15 +53,15 @@ LSN parallel_oid_replay::operator()(void *arg, sm_log_scan_mgr *s, LSN from,
 process:
   for (auto &r : redoers) {
     // Scan the rest of the log
-    if (not r.done and not r.is_impersonated() and r.try_impersonate()) {
-      r.start();
+    if (not r.done and not r.IsImpersonated() and r.TryImpersonate()) {
+      r.Start();
     }
   }
 
   // Loop over existing redoers to scavenge and reuse available threads
   while (done < redoers.size()) {
     for (auto &r : redoers) {
-      if (r.is_impersonated() and r.try_join()) {
+      if (r.IsImpersonated() and r.TryJoin()) {
         if (r.replayed_lsn > replayed_lsn) {
           replayed_lsn = r.replayed_lsn;
         }
@@ -97,7 +98,7 @@ void parallel_oid_replay::redo_runner::redo_partition() {
   ALWAYS_ASSERT(owner->start_lsn.segment() >= 1);
   auto *scan = owner->scanner->new_log_scan(owner->start_lsn,
                                             config::eager_warm_up(), false);
-  static __thread std::unordered_map<FID, OID> max_oid;
+  static thread_local std::unordered_map<FID, OID> max_oid;
   replayed_lsn = INVALID_LSN;
 
   for (; scan->valid() and scan->payload_lsn().offset() + scan->payload_size() <= owner->end_lsn.offset(); scan->next()) {
@@ -166,7 +167,7 @@ void parallel_oid_replay::redo_runner::redo_partition() {
   RCU::rcu_exit();
 }
 
-void parallel_oid_replay::redo_runner::my_work(char *) {
+void parallel_oid_replay::redo_runner::MyWork(char *) {
   redo_partition();
   done = true;
   __sync_synchronize();
