@@ -33,18 +33,13 @@ By default we support up to 256 cores. The limit can be adjusted by setting `MAX
 #### Build it
 --------
 
-We do not allow building in the source directory. Suppose we build in a separate directory:
+Currently the code only compiles with clang. We do not allow building in the source directory. Suppose we build in a separate directory:
 
 ```
 $ mkdir build
 $ cd build
-$ cmake ../ -DCMAKE_BUILD_TYPE=[Debug/Release/RelWithDebInfo]
-$ make -jN
-```
-
-Currently the code only compiles with clang, issue the following `cmake` command:
-```
 $ CC=clang CXX=clang++ cmake ../ -DCMAKE_BUILD_TYPE=[Debug/Release/RelWithDebInfo]
+$ make -jN
 ```
 
 After `make` there will be three executables under `build`: 
