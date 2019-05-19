@@ -13,9 +13,7 @@ namespace ermia {
 Engine::Engine() {
   config::sanity_check();
 
-  if (config::is_backup_srv()) {
-    rep::BackupStartReplication();
-  } else {
+  if (!config::is_backup_srv()) {
     if (!RCU::rcu_is_registered()) {
       RCU::rcu_register();
     }

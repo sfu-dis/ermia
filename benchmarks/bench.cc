@@ -169,6 +169,10 @@ void bench_runner::create_files_task(char *) {
 }
 
 void bench_runner::run() {
+  if (ermia::config::is_backup_srv()) {
+    ermia::rep::BackupStartReplication();
+  }
+
   if (ermia::config::worker_threads ||
       (ermia::config::is_backup_srv() && ermia::config::replay_threads && ermia::config::command_log)) {
     // Get a thread to use benchmark-provided prepare(), which gathers
