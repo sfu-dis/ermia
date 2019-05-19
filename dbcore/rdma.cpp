@@ -289,7 +289,7 @@ void context::rdma_write_imm_n(struct write_request *req_list) {
   struct ibv_send_wr *bad_wr = nullptr;
   int ret = ibv_post_send(qp, &req_wrs[0], &bad_wr);
   THROW_IF(ret, illegal_argument, "ibv_post_send() failed");
-  if (req->sync) {
+  if (req_list->sync) {
     poll_send_cq();
   }
 }
