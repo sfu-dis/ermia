@@ -18,8 +18,7 @@ public:
   // All supported index types
   static const uint16_t kIndexConcurrentMasstree = 0x1;
 
-  inline void CreateMasstreeTable(const char *name, bool decoupled,
-                                  const char *primary_name = nullptr) {
+  inline void CreateMasstreeTable(const char *name, const char *primary_name = nullptr) {
     CreateTable(kIndexConcurrentMasstree, name, primary_name);
   }
 

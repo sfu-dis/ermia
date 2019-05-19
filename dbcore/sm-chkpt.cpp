@@ -295,7 +295,6 @@ void sm_chkpt_mgr::recover(LSN chkpt_start) {
     // Format: [table name length, table name, table FID, table himark]
     // Read the table's name
     size_t len = *(size_t*)read_buffer(sizeof(size_t));
-    ;
     nbytes += sizeof(size_t);
     char name_buf[256];
     memcpy(name_buf, read_buffer(len), len);
