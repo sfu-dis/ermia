@@ -92,6 +92,9 @@ protected:
   transaction(uint64_t flags, str_arena &sa);
   ~transaction();
   void initialize_read_write();
+  inline uint64_t get_clsn() {
+    return xc->end;
+  }
 
   inline void ensure_active() {
     volatile_write(xc->state, TXN::TXN_ACTIVE);

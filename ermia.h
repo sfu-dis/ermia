@@ -52,6 +52,10 @@ public:
     return rc;
   }
 
+  inline uint64_t GetLSN(transaction *t) {
+    return t->get_clsn();
+  }
+
   inline void Abort(transaction *t) {
     t->Abort();
     t->~transaction();
