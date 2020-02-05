@@ -83,7 +83,9 @@ sm_log_alloc_mgr::~sm_log_alloc_mgr() {
 }
 
 void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
-                                             uint64_t start_time) {
+                                             uint64_t start_time,
+                                             std::function<void(void *)> callback,
+                                             void *context) {
   uint64_t lsn = config::command_log ?
                  CommandLog::cmd_log->GetTlsOffset() :
                  get_tls_lsn_offset() & ~kDirtyTlsLsnOffset;
@@ -91,7 +93,9 @@ void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
 }
 
 void sm_log_alloc_mgr::commit_queue::push_back(uint64_t lsn,
-                                               uint64_t start_time) {
+                                               uint64_t start_time,
+                                               std::function<void(void *)> callback,
+                                               void *context) {
   bool flush = false;
   bool insert = true;
 retry :
@@ -112,6 +116,8 @@ retry :
       uint32_t idx = (start + items) % config::group_commit_queue_length;
       volatile_write(queue[idx].lsn, lsn);
       volatile_write(queue[idx].start_time, start_time);
+      volatile_write(queue[idx].context, context);
+      queue[idx].post_commit_callback = callback;
       volatile_write(items, items + 1);
       ASSERT(items == size());
       insert = false;
@@ -135,6 +141,8 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
       auto &entry = _commit_queue[i].queue[idx];
       if (volatile_read(entry.lsn) > upto) {
         break;
+      } else if (entry.context) {
+        entry.post_commit_callback(entry.context);
       }
       _commit_queue[i].total_latency_us += end_time - entry.start_time;
       dequeue++;
@@ -831,6 +839,11 @@ void sm_log_alloc_mgr::_log_write_daemon() {
     segment_id *durable_sid = nullptr;
     if (new_dlsn_offset > _durable_flushed_lsn_offset) {
       durable_sid = PrimaryFlushLog(new_dlsn_offset);
+    } else {
+      // For the case in pipelined commit where no LSN change but there are other
+      // items added to it (e.g., DDL) only 
+      util::timer t;
+      dequeue_committed_xcts(new_dlsn_offset, t.get_start());
     }
 
     /* Having completed a round of writes, notify waiting threads
@@ -889,6 +902,14 @@ void sm_log_alloc_mgr::_log_write_daemon() {
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += 5000;
         _write_daemon_cond.timedwait(_write_daemon_mutex, &ts);
+
+        if (!(volatile_read(_write_daemon_state) & DAEMON_HAS_WORK)) {
+          // Will sleep again. Check the commit queue before that
+          // Note that this is only a temporary solution for things that won't
+          // generate a log record and their lsn recorded in the queue is 0
+          util::timer t;
+          dequeue_committed_xcts(_durable_flushed_lsn_offset, t.get_start());
+        }
       }
 
       _write_daemon_should_wake = false;
