@@ -381,6 +381,7 @@ template <typename P>
 template <typename H, typename F>
 PROMISE(int) basic_table<P>::scan_oid(H helper, Str firstkey, bool emit_firstkey, F &scanner,
                                             ermia::TXN::xid_context *xc, threadinfo &ti) const {
+  MARK_REFERENCED(xc);
   typedef typename P::ikey_type ikey_type;
   typedef typename node_type::key_type key_type;
   typedef typename node_type::leaf_type::leafvalue_type leafvalue_type;

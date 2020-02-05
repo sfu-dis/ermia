@@ -100,6 +100,7 @@ public:
     }
 
     void reserve(uint32_t newSize) {
+      MARK_REFERENCED(newSize);
         // mock std container, no op
     }
 
@@ -422,7 +423,7 @@ template <> struct task<void>::promise_type : coro_task_private::promise_base {
     return task{coroutine_handle};
   }
 
-  void return_void() {};
+  void return_void() {}
 };
 
 template <typename T>

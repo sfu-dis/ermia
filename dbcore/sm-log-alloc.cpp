@@ -64,6 +64,7 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
     for (uint32_t i = 0; i < n; ++i) {
       _commit_queue[i].lm = this;
     }
+    LOG(INFO) << "Created " << n << " commit queues";
 
     // fire up the log writing daemon
     _write_daemon_mutex.lock();

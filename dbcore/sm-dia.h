@@ -145,7 +145,7 @@ public:
 
   inline void MultiDequeue(uint32_t dequeue_size) {
     uint32_t pos = volatile_read(start);
-    for (int i = 0; i < dequeue_size; ++i) {
+    for (uint i = 0; i < dequeue_size; ++i) {
       Request &req = requests[(pos + i) % kMaxSize];
       volatile_write(req.transaction, nullptr);
     }
@@ -211,8 +211,8 @@ private:
   uint32_t kBatchSize;
 
 public:
-  IndexThread(bool physical = false)
-      : ermia::thread::Runner(physical /* default thread is logical*/) {
+  IndexThread(bool want_physical = false)
+      : ermia::thread::Runner(want_physical /* default thread is logical*/) {
     kBatchSize = ermia::config::dia_batch_size;
     if (config::dia_req_handler == "serial") {
       if (ermia::config::dia_req_coalesce)
