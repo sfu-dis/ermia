@@ -89,7 +89,7 @@ void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
   uint64_t lsn = config::command_log ?
                  CommandLog::cmd_log->GetTlsOffset() :
                  get_tls_lsn_offset() & ~kDirtyTlsLsnOffset;
-  _commit_queue[worker_id].push_back(lsn, start_time);
+  _commit_queue[worker_id].push_back(lsn, start_time, callback, context);
 }
 
 void sm_log_alloc_mgr::commit_queue::push_back(uint64_t lsn,
