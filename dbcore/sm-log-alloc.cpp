@@ -87,9 +87,8 @@ void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
                                              uint64_t start_time,
                                              std::function<void(void *)> callback,
                                              void *context) {
-  // uint64_t lsn = config::command_log ?
-  //                CommandLog::cmd_log->GetTlsOffset() :
-  //                get_tls_lsn_offset() & ~kDirtyTlsLsnOffset;
+  lsn = config::command_log ?
+                CommandLog::cmd_log->GetTlsOffset() : lsn;
   _commit_queue[worker_id].push_back(lsn, start_time, callback, context);
 }
 
@@ -143,6 +142,7 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
       if (volatile_read(entry.lsn) > upto) {
         break;
       } else if (entry.context) {
+        fprintf(stderr, "[ERMIA] Dequeue entry %p with LSN 0x%lX, callback\n", &entry, entry.lsn);
         entry.post_commit_callback(entry.context);
       }
       _commit_queue[i].total_latency_us += end_time - entry.start_time;
