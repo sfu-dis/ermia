@@ -73,7 +73,7 @@ bool bench_worker::finish_workload(rc_t ret, uint32_t workload_idx, util::timer 
     ++ntxn_commits;
     std::get<0>(txn_counts[workload_idx])++;
     if (!ermia::config::is_backup_srv() && ermia::config::group_commit) {
-      ermia::logmgr->enqueue_committed_xct(worker_id, t.get_start());
+      ermia::logmgr->enqueue_committed_xct(worker_id, 0, t.get_start());
     } else {
       latency_numer_us += t.lap();
     }

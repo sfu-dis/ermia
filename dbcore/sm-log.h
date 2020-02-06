@@ -403,7 +403,7 @@ struct sm_log {
   LSN backup_redo_log_by_oid(LSN start_lsn, LSN end_lsn);
   void start_logbuf_redoers();
   void recover();
-  void enqueue_committed_xct(uint32_t worker_id, uint64_t start_time,
+  void enqueue_committed_xct(uint32_t worker_id, uint64_t lsn, uint64_t start_time,
                              std::function<void(void*)> callback = nullptr, void *context = nullptr);
   void create_segment_file(segment_id *sid);
   uint64_t durable_flushed_lsn_offset();
