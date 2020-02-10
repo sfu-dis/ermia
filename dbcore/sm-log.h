@@ -404,7 +404,7 @@ struct sm_log {
   void start_logbuf_redoers();
   void recover();
   void enqueue_committed_xct(uint32_t worker_id, uint64_t lsn, uint64_t start_time,
-                             std::function<void(void*)> callback = nullptr, void *context = nullptr);
+                             std::function<void(void*, bool)> callback = nullptr, void *context = nullptr);
   void create_segment_file(segment_id *sid);
   uint64_t durable_flushed_lsn_offset();
   sm_log_recover_impl *get_backup_replay_functor();

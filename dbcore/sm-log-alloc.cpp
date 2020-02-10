@@ -85,7 +85,7 @@ sm_log_alloc_mgr::~sm_log_alloc_mgr() {
 void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
                                              uint64_t lsn,
                                              uint64_t start_time,
-                                             std::function<void(void *)> callback,
+                                             std::function<void(void *, bool)> callback,
                                              void *context) {
   lsn = config::command_log ?
                 CommandLog::cmd_log->GetTlsOffset() : lsn;
@@ -94,7 +94,7 @@ void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
 
 void sm_log_alloc_mgr::commit_queue::push_back(uint64_t lsn,
                                                uint64_t start_time,
-                                               std::function<void(void *)> callback,
+                                               std::function<void(void *, bool)> callback,
                                                void *context) {
   bool flush = false;
   bool insert = true;
@@ -130,6 +130,8 @@ retry :
 
 void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
                                               uint64_t end_time) {
+  // Let's try if this work!
+  upto = 0xFFFFFF;
   uint32_t n = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
   for (uint32_t i = 0; i < n; i++) {
     CRITICAL_SECTION(cs, _commit_queue[i].lock);
@@ -143,7 +145,7 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
         break;
       } else if (entry.context) {
         fprintf(stderr, "[ERMIA] Dequeue entry %p with LSN 0x%lX, callback\n", &entry, entry.lsn);
-        entry.post_commit_callback(entry.context);
+        entry.post_commit_callback(entry.context, false);
       }
       _commit_queue[i].total_latency_us += end_time - entry.start_time;
       dequeue++;
