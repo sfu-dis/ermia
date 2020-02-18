@@ -92,6 +92,8 @@ void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
   _commit_queue[worker_id].push_back(lsn, start_time, callback, context);
 }
 
+// (jianqiuz) When pushing the lsn entry into commit pipelining queue,
+// it will see if we need to flush the queue.
 void sm_log_alloc_mgr::commit_queue::push_back(uint64_t lsn,
                                                uint64_t start_time,
                                                std::function<void(void *, bool)> callback,
@@ -131,12 +133,15 @@ retry :
 void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
                                               uint64_t end_time) {
   // Let's try if this work!
-  upto = 0xFFFFFF;
+  // upto = 0xFFFFFF;
   uint32_t n = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
   for (uint32_t i = 0; i < n; i++) {
     CRITICAL_SECTION(cs, _commit_queue[i].lock);
     uint32_t n = volatile_read(_commit_queue[i].start);
     uint32_t size = _commit_queue[i].size();
+    if (size) {
+      printf("[ERMIA] Commit queue size = %d\n", size);
+    }
     uint32_t dequeue = 0;
     for (uint32_t j = 0; j < size; ++j) {
       uint32_t idx = (n + j) % config::group_commit_queue_length;
@@ -840,6 +845,7 @@ void sm_log_alloc_mgr::_log_write_daemon() {
       }
     }
     segment_id *durable_sid = nullptr;
+    fprintf(stderr, "[ERMIA] new_dlsn_offset = 0x%x, _durable_flushed_lsn_offset = 0x%x\n", new_dlsn_offset, _durable_flushed_lsn_offset);
     if (new_dlsn_offset > _durable_flushed_lsn_offset) {
       durable_sid = PrimaryFlushLog(new_dlsn_offset);
     } else {
@@ -903,19 +909,25 @@ void sm_log_alloc_mgr::_log_write_daemon() {
         // logbuf => nobody kicking => log buffer never flushed
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 5000;
-        _write_daemon_cond.timedwait(_write_daemon_mutex, &ts);
-
+        ts.tv_sec += ermia::config::group_commit_timeout;
+        // If we exceed the timeout, we need to stop sleeping and return to work?
+        int ret = _write_daemon_cond.timedwait(_write_daemon_mutex, &ts);
         if (!(volatile_read(_write_daemon_state) & DAEMON_HAS_WORK)) {
           // Will sleep again. Check the commit queue before that
           // Note that this is only a temporary solution for things that won't
           // generate a log record and their lsn recorded in the queue is 0
           util::timer t;
           dequeue_committed_xcts(_durable_flushed_lsn_offset, t.get_start());
+          if (ret == ETIMEDOUT) {
+            // We run out of time, stop sleeping and wake up once
+            printf("WAKEUP!!!\n");
+            break;
+          }
         }
+
+        _write_daemon_should_wake = false;
       }
 
-      _write_daemon_should_wake = false;
     }
 
     // next loop iteration!
