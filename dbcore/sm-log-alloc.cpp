@@ -83,18 +83,19 @@ sm_log_alloc_mgr::~sm_log_alloc_mgr() {
 }
 
 void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
+                                             LSNType type,
                                              uint64_t lsn,
                                              uint64_t start_time,
                                              std::function<void(void *, bool)> callback,
                                              void *context) {
   lsn = config::command_log ?
                 CommandLog::cmd_log->GetTlsOffset() : lsn;
-  _commit_queue[worker_id].push_back(lsn, start_time, callback, context);
+  _commit_queue[worker_id].push_back(type, lsn, start_time, callback, context);
 }
 
 // (jianqiuz) When pushing the lsn entry into commit pipelining queue,
 // it will see if we need to flush the queue.
-void sm_log_alloc_mgr::commit_queue::push_back(uint64_t lsn,
+void sm_log_alloc_mgr::commit_queue::push_back(LSNType type, uint64_t lsn,
                                                uint64_t start_time,
                                                std::function<void(void *, bool)> callback,
                                                void *context) {
@@ -130,11 +131,30 @@ retry :
   }
 }
 
+// Helper function to dump the queue data out.
+void sm_log_alloc_mgr::dump_queue() {
+  uint32_t n = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
+  for(uint32_t i = 0; i < n; i++) {
+    //CRITICAL_SECTION(cs, _commit_queue[i].lock);
+    uint32_t begin = volatile_read(_commit_queue[i].start);
+    uint32_t size = _commit_queue[i].size();
+    if (size) {
+      printf("[ERMIA] Commit queue size = %d\n", size);
+    }
+    printf("=BEGIN QUEUE %d=\n", i);
+    for(auto j = 0; j < size; j++) {
+      uint32_t idx = (begin + j)  % config::group_commit_queue_length;
+      auto entry = _commit_queue[i].queue[idx];
+      printf("Entry %d: Type = %c, LSN = 0x%lX\n", j, entry.type, entry.lsn);
+    }
+    printf("=END QUEUE %d=\n", i);
+  }
+}
+
 void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
                                               uint64_t end_time) {
-  // Let's try if this work!
-  // upto = 0xFFFFFF;
   uint32_t n = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
+  dump_queue();
   for (uint32_t i = 0; i < n; i++) {
     CRITICAL_SECTION(cs, _commit_queue[i].lock);
     uint32_t n = volatile_read(_commit_queue[i].start);
@@ -146,7 +166,8 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
     for (uint32_t j = 0; j < size; ++j) {
       uint32_t idx = (n + j) % config::group_commit_queue_length;
       auto &entry = _commit_queue[i].queue[idx];
-      if (volatile_read(entry.lsn) > upto) {
+      // TODO(Just simple hack now, fix it later)
+      if (volatile_read(entry.lsn) > upto && entry.type == lsn_ermia) {
         break;
       } else if (entry.context) {
         fprintf(stderr, "[ERMIA] Dequeue entry %p with LSN 0x%lX, callback\n", &entry, entry.lsn);
