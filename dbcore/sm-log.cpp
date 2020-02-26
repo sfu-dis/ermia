@@ -74,6 +74,10 @@ void sm_log::enqueue_committed_xct(uint32_t worker_id, LSNType type, uint64_t ls
   get_impl(this)->_lm.enqueue_committed_xct(worker_id, type, lsn, start_time, callback, context);
 }
 
+void sm_log::set_upto_lsn(LSNType type, uint64_t lsn) {
+  return get_impl(this)->_lm.set_upto_lsn(type, lsn);
+}
+
 LSN sm_log::flush() { return get_impl(this)->_lm.flush(); }
 
 void sm_log::update_chkpt_mark(LSN cstart, LSN cend) {

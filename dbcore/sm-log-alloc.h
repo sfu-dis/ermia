@@ -33,6 +33,7 @@ struct sm_log_alloc_mgr {
    */
   LSN flush();
   void dump_queue();
+  std::atomic<uint64_t> *upto_lsn_tbl;
 
   /* Retrieve the current end of log
    */
@@ -83,6 +84,7 @@ struct sm_log_alloc_mgr {
   uint64_t smallest_tls_lsn_offset();
   void enqueue_committed_xct(uint32_t worker_id, LSNType type, uint64_t lsn, uint64_t start_time, std::function<void(void *, bool)> callback, void *context = nullptr);
   void dequeue_committed_xcts(uint64_t up_to, uint64_t end_time);
+  void set_upto_lsn(LSNType type, uint64_t lsn);
   int open_segment_for_read(segment_id * sid);
 
   sm_log_recover_mgr _lm;

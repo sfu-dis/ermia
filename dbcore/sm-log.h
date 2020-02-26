@@ -24,10 +24,12 @@ struct segment_id;
 struct sm_log_recover_impl;
 
 enum LSNType {
-  lsn_ermia = 'e',
-  lsn_innodb = 'i',
-  lsn_undefined = '?',
+  lsn_ermia = 0,
+  lsn_innodb = 1,
+  lsn_undefined = 0xFFFF,
 };
+
+#define MAX_LSN_TYPE 0xFFFF
 
 struct sm_tx_log {
   /* Record an insertion. The payload of the version will be
@@ -411,6 +413,7 @@ struct sm_log {
   void recover();
   void enqueue_committed_xct(uint32_t worker_id, LSNType type, uint64_t lsn, uint64_t start_time,
                              std::function<void(void*, bool)> callback = nullptr, void *context = nullptr);
+  void set_upto_lsn(LSNType type, uint64_t lsn);
   void create_segment_file(segment_id *sid);
   uint64_t durable_flushed_lsn_offset();
   sm_log_recover_impl *get_backup_replay_functor();

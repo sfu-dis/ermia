@@ -34,6 +34,16 @@ uint64_t sm_log_alloc_mgr::get_tls_lsn_offset() {
   return volatile_read(_tls_lsn_offset[thread::MyId()]);
 }
 
+void sm_log_alloc_mgr::set_upto_lsn(LSNType type, uint64_t lsn) {
+  // For undefined LSN it only should be 0
+  if(type == lsn_undefined) {
+    ALWAYS_ASSERT(lsn == 0);
+  }
+  std::atomic<uint64_t> &cell = upto_lsn_tbl[static_cast<uint32_t>(type)];
+  cell.store(lsn);
+  return;
+}
+
 /* We have to find the end of the log files on disk before
    constructing the log buffer in memory. It's also a convenient time
    to do the rest of recovery, because it prevents any attempt at
@@ -74,12 +84,17 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
         pthread_create(&_write_daemon_tid, NULL, &log_write_daemon_thunk, this);
     THROW_IF(err, os_error, err, "Unable to start log writer daemon thread");
   }
+  upto_lsn_tbl = (std::atomic<uint64_t> *)malloc(sizeof(std::atomic<uint64_t>) * MAX_LSN_TYPE + 1);
+  for(auto i = 0; i < MAX_LSN_TYPE + 1; i++) {
+    new (upto_lsn_tbl + i) std::atomic<uint64_t>(static_cast<uint64_t>(0));
+  }
 }
 
 sm_log_alloc_mgr::~sm_log_alloc_mgr() {
   _write_daemon_should_stop = true;
   int err = pthread_join(_write_daemon_tid, NULL);
   LOG_IF(FATAL, err) << "Unable to join log writer daemon thread";
+  free(upto_lsn_tbl);
 }
 
 void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
@@ -120,6 +135,7 @@ retry :
       volatile_write(queue[idx].lsn, lsn);
       volatile_write(queue[idx].start_time, start_time);
       volatile_write(queue[idx].context, context);
+      volatile_write(queue[idx].type, type);
       queue[idx].post_commit_callback = callback;
       volatile_write(items, items + 1);
       ASSERT(items == size());
@@ -140,36 +156,41 @@ void sm_log_alloc_mgr::dump_queue() {
     uint32_t size = _commit_queue[i].size();
     if (size) {
       printf("[ERMIA] Commit queue size = %d\n", size);
+      printf("=BEGIN QUEUE %d=\n", i);
+      for(auto j = 0; j < size; j++) {
+        uint32_t idx = (begin + j)  % config::group_commit_queue_length;
+        auto entry = _commit_queue[i].queue[idx];
+        printf("Entry %d: Type = 0x%X, LSN = 0x%lX\n", j, entry.type, entry.lsn);
+      }
+      printf("=END QUEUE %d=\n", i);
     }
-    printf("=BEGIN QUEUE %d=\n", i);
-    for(auto j = 0; j < size; j++) {
-      uint32_t idx = (begin + j)  % config::group_commit_queue_length;
-      auto entry = _commit_queue[i].queue[idx];
-      printf("Entry %d: Type = %c, LSN = 0x%lX\n", j, entry.type, entry.lsn);
-    }
-    printf("=END QUEUE %d=\n", i);
   }
 }
 
 void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
                                               uint64_t end_time) {
   uint32_t n = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
-  dump_queue();
+  bool printed = false;
   for (uint32_t i = 0; i < n; i++) {
     CRITICAL_SECTION(cs, _commit_queue[i].lock);
     uint32_t n = volatile_read(_commit_queue[i].start);
     uint32_t size = _commit_queue[i].size();
-    if (size) {
-      printf("[ERMIA] Commit queue size = %d\n", size);
+    if (size && !printed) {
+      dump_queue();
+      printed = true;
     }
     uint32_t dequeue = 0;
     for (uint32_t j = 0; j < size; ++j) {
       uint32_t idx = (n + j) % config::group_commit_queue_length;
       auto &entry = _commit_queue[i].queue[idx];
       // TODO(Just simple hack now, fix it later)
-      if (volatile_read(entry.lsn) > upto && entry.type == lsn_ermia) {
-        break;
-      } else if (entry.context) {
+      printf("upto_lsn is 0x%X, entry type is 0x%x\n", upto_lsn_tbl[entry.type].load(), entry.type);
+      upto = upto_lsn_tbl[entry.type].load();
+      if (volatile_read(entry.lsn) > upto) {
+        // We cannot break now, since in the queue we have different type of log entry
+        continue;
+      } 
+      if (entry.context) {
         fprintf(stderr, "[ERMIA] Dequeue entry %p with LSN 0x%lX, callback\n", &entry, entry.lsn);
         entry.post_commit_callback(entry.context, false);
       }
@@ -557,6 +578,7 @@ segment_id *sm_log_alloc_mgr::PrimaryFlushLog(uint64_t new_dlsn_offset,
     // update values for next round
     durable_sid = new_sid;
     _durable_flushed_lsn_offset = new_offset;
+    set_upto_lsn(lsn_ermia, _durable_flushed_lsn_offset);
     durable_byte = new_byte;
 
     if (update_dmark) {
@@ -866,7 +888,7 @@ void sm_log_alloc_mgr::_log_write_daemon() {
       }
     }
     segment_id *durable_sid = nullptr;
-    fprintf(stderr, "[ERMIA] new_dlsn_offset = 0x%x, _durable_flushed_lsn_offset = 0x%x\n", new_dlsn_offset, _durable_flushed_lsn_offset);
+    // fprintf(stderr, "[ERMIA] new_dlsn_offset = 0x%x, _durable_flushed_lsn_offset = 0x%x\n", new_dlsn_offset, _durable_flushed_lsn_offset);
     if (new_dlsn_offset > _durable_flushed_lsn_offset) {
       durable_sid = PrimaryFlushLog(new_dlsn_offset);
     } else {
@@ -930,7 +952,7 @@ void sm_log_alloc_mgr::_log_write_daemon() {
         // logbuf => nobody kicking => log buffer never flushed
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_sec += ermia::config::group_commit_timeout;
+        ts.tv_nsec += ermia::config::group_commit_timeout * 1000;
         // If we exceed the timeout, we need to stop sleeping and return to work?
         int ret = _write_daemon_cond.timedwait(_write_daemon_mutex, &ts);
         if (!(volatile_read(_write_daemon_state) & DAEMON_HAS_WORK)) {
@@ -941,7 +963,6 @@ void sm_log_alloc_mgr::_log_write_daemon() {
           dequeue_committed_xcts(_durable_flushed_lsn_offset, t.get_start());
           if (ret == ETIMEDOUT) {
             // We run out of time, stop sleeping and wake up once
-            printf("WAKEUP!!!\n");
             break;
           }
         }
