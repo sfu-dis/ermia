@@ -84,9 +84,8 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
         pthread_create(&_write_daemon_tid, NULL, &log_write_daemon_thunk, this);
     THROW_IF(err, os_error, err, "Unable to start log writer daemon thread");
   }
-  upto_lsn_tbl = (std::atomic<uint64_t> *)malloc(sizeof(std::atomic<uint64_t>) * MAX_LSN_TYPE + 1);
   for(auto i = 0; i < MAX_LSN_TYPE + 1; i++) {
-    new (upto_lsn_tbl + i) std::atomic<uint64_t>(static_cast<uint64_t>(0));
+    std::atomic_init(upto_lsn_tbl + i, static_cast<uint64_t>(0));
   }
 }
 
@@ -94,7 +93,6 @@ sm_log_alloc_mgr::~sm_log_alloc_mgr() {
   _write_daemon_should_stop = true;
   int err = pthread_join(_write_daemon_tid, NULL);
   LOG_IF(FATAL, err) << "Unable to join log writer daemon thread";
-  free(upto_lsn_tbl);
 }
 
 void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,

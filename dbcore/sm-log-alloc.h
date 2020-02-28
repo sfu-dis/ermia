@@ -33,7 +33,7 @@ struct sm_log_alloc_mgr {
    */
   LSN flush();
   void dump_queue();
-  std::atomic<uint64_t> *upto_lsn_tbl;
+  std::atomic<uint64_t> upto_lsn_tbl[MAX_LSN_TYPE + 1];
 
   /* Retrieve the current end of log
    */
