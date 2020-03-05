@@ -84,7 +84,7 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
         pthread_create(&_write_daemon_tid, NULL, &log_write_daemon_thunk, this);
     THROW_IF(err, os_error, err, "Unable to start log writer daemon thread");
   }
-  for(auto i = 0; i < MAX_LSN_TYPE + 1; i++) {
+  for(auto i = 0; i < LSNType::count; i++) {
     std::atomic_init(upto_lsn_tbl + i, static_cast<uint64_t>(0));
   }
 }
@@ -181,14 +181,16 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
     for (uint32_t j = 0; j < size; ++j) {
       uint32_t idx = (n + j) % config::group_commit_queue_length;
       auto &entry = _commit_queue[i].queue[idx];
-      // TODO(Just simple hack now, fix it later)
-      printf("upto_lsn is 0x%X, entry type is 0x%x\n", upto_lsn_tbl[entry.type].load(), entry.type);
-      upto = upto_lsn_tbl[entry.type].load();
+      // FIXME(tzwang): make this general. For now it's only when the engine
+      // isn't ERMIA do we look at the array.
+      if (entry.type != LSNType::lsn_ermia) {
+        upto = upto_lsn_tbl[entry.type];
+      }
       if (volatile_read(entry.lsn) > upto) {
-        // We cannot break now, since in the queue we have different type of log entry
-        continue;
-      } 
-      if (entry.context) {
+        // Have to stop even if just one type is not catching up - here we only
+        // dequeue in consecutive batches.
+        break;
+      } else if (entry.context) {
         fprintf(stderr, "[ERMIA] Dequeue entry %p with LSN 0x%lX, callback\n", &entry, entry.lsn);
         entry.post_commit_callback(entry.context, false);
       }
