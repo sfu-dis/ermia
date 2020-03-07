@@ -1099,8 +1099,13 @@ rc_t transaction::si_commit() {
   }
 
   ASSERT(log);
+
   // get clsn, abort if failed
+  // NOTE(jianqiuz): This call is still safe even we already finish 
+  // the pre_commit. If commit block is already there then it didn't
+  // request a new one, just return the previous commit_lsn to caller
   xc->end = log->pre_commit().offset();
+
   if (xc->end == 0) return rc_t{RC_ABORT_INTERNAL};
 
   if (config::phantom_prot && !MasstreeCheckPhantom()) {
