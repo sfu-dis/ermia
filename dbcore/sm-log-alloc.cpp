@@ -173,23 +173,17 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
     CRITICAL_SECTION(cs, _commit_queue[i].lock);
     uint32_t n = volatile_read(_commit_queue[i].start);
     uint32_t size = _commit_queue[i].size();
-    if (size && !printed) {
-      dump_queue();
-      printed = true;
-    }
+
     uint32_t dequeue = 0;
     for (uint32_t j = 0; j < size; ++j) {
       uint32_t idx = (n + j) % config::group_commit_queue_length;
       auto &entry = _commit_queue[i].queue[idx];
-      // TODO(Just simple hack now, fix it later)
-      printf("upto_lsn is 0x%X, entry type is 0x%x\n", upto_lsn_tbl[entry.type].load(), entry.type);
       upto = upto_lsn_tbl[entry.type].load();
       if (volatile_read(entry.lsn) > upto) {
         // We cannot break now, since in the queue we have different type of log entry
         continue;
       } 
       if (entry.context) {
-        fprintf(stderr, "[ERMIA] Dequeue entry %p with LSN 0x%lX, callback\n", &entry, entry.lsn);
         entry.post_commit_callback(entry.context, false);
       }
       _commit_queue[i].total_latency_us += end_time - entry.start_time;
@@ -886,7 +880,6 @@ void sm_log_alloc_mgr::_log_write_daemon() {
       }
     }
     segment_id *durable_sid = nullptr;
-    // fprintf(stderr, "[ERMIA] new_dlsn_offset = 0x%x, _durable_flushed_lsn_offset = 0x%x\n", new_dlsn_offset, _durable_flushed_lsn_offset);
     if (new_dlsn_offset > _durable_flushed_lsn_offset) {
       durable_sid = PrimaryFlushLog(new_dlsn_offset);
     } else {
