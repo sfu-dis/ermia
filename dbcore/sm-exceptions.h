@@ -41,8 +41,13 @@
 #define THROW_IF(cond, eclass, ...)                              \
   do {                                                           \
     if (cond) {                                                  \
-      printf("Exception thrown at %s:%d\n", __FILE__, __LINE__); \
-      throw eclass{__VA_ARGS__};                                 \
+      fprintf(stderr, "Exception thrown at %s:%d\n", __FILE__, __LINE__); \
+      try {                                                      \
+        throw eclass{__VA_ARGS__};                               \
+      } catch (eclass& e) {                                      \
+        fprintf(stderr, "\033[0;31m%s\033[0m\n", e.msg);                          \
+        throw e;                                                 \
+      }                                                          \
     }                                                            \
   } while (0)
 
@@ -102,11 +107,14 @@ struct os_error {
  */
 struct rcu_alloc_fail {
   size_t nbytes;
-  rcu_alloc_fail(size_t n) : nbytes(n) {}
+  char const *msg;
+  rcu_alloc_fail(size_t n, char const *m = "RCU allocation fail") : nbytes(n), msg(m) {}
 };
 
 struct log_is_full {
   /* no members */
+  char const *msg;
+  log_is_full(char const *m = "Log is full") : msg(m) {}
 };
 
 /* Something went wrong with log file handling that prevents any more
