@@ -26,10 +26,9 @@ struct sm_log_recover_impl;
 enum LSNType {
   lsn_ermia = 0,
   lsn_innodb = 1,
+  count = 2,
   lsn_undefined = 0xFFFF,
 };
-
-#define MAX_LSN_TYPE 0xFFFF
 
 struct sm_tx_log {
   /* Record an insertion. The payload of the version will be
