@@ -173,10 +173,7 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
     CRITICAL_SECTION(cs, _commit_queue[i].lock);
     uint32_t n = volatile_read(_commit_queue[i].start);
     uint32_t size = _commit_queue[i].size();
-    if (size && !printed) {
-      dump_queue();
-      printed = true;
-    }
+
     uint32_t dequeue = 0;
     for (uint32_t j = 0; j < size; ++j) {
       uint32_t idx = (n + j) % config::group_commit_queue_length;
@@ -888,7 +885,6 @@ void sm_log_alloc_mgr::_log_write_daemon() {
       }
     }
     segment_id *durable_sid = nullptr;
-    // fprintf(stderr, "[ERMIA] new_dlsn_offset = 0x%x, _durable_flushed_lsn_offset = 0x%x\n", new_dlsn_offset, _durable_flushed_lsn_offset);
     if (new_dlsn_offset > _durable_flushed_lsn_offset) {
       durable_sid = PrimaryFlushLog(new_dlsn_offset);
     } else {

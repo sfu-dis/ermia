@@ -56,6 +56,10 @@ public:
     return t->get_clsn();
   }
 
+  inline uintptr_t PreCommit(transaction *t) {
+    return t->pre_commit().offset();
+  }
+
   inline void Abort(transaction *t) {
     t->Abort();
     t->~transaction();

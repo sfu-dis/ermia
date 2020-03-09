@@ -96,6 +96,15 @@ protected:
     return xc->end;
   }
 
+  inline LSN pre_commit() {
+    if (flags & TXN_FLAG_READ_ONLY) {
+      // TODO(jianqiuz): Calling this function
+      // for a read only txn doesn't make sense
+      return INVALID_LSN;
+    }
+    return log->pre_commit();
+  }
+
   inline void ensure_active() {
     volatile_write(xc->state, TXN::TXN_ACTIVE);
     ASSERT(state() == TXN::TXN_ACTIVE);
