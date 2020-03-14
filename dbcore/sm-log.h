@@ -30,6 +30,57 @@ enum LSNType {
   lsn_undefined = 0xFFFF,
 };
 
+// Engine specific LSN
+struct eLSN {
+  uint64_t lsn = 0;
+  LSNType type = lsn_undefined;
+};
+
+// TODO(jianqiuz): Plz help me think a better name for this vector lol
+// Current name means: real LSN
+struct rLSN {
+    // enqueue_committed_xct may need to modify the data
+    // so we keep it public only for this reason
+    std::vector<eLSN> _data;
+
+    inline void push(uint64_t lsn, LSNType type) {
+      eLSN elsn;
+      elsn.lsn = lsn;
+      elsn.type = type;
+      _data.push_back(elsn);
+    }
+
+    inline void clear() {
+      _data.clear();
+    }
+
+    inline rLSN(const rLSN &other) {
+      printf("[VOID001] Copy constructor called\n");
+      auto &vec = other._data;
+      _data.clear();
+      for (auto v : vec) {
+        _data.push_back(v);
+      }
+    }
+
+    rLSN() {
+      _data.clear();
+    }
+
+    inline void print(bool newline = false) {
+      for (auto v : _data) {
+        printf("<0x%lx, 0x%x>,", v.lsn, v.type);
+      }
+      if (newline) {
+        printf("\n");
+      }
+    }
+
+    inline const std::vector<eLSN> &list() {
+      return _data;
+    }
+};
+
 struct sm_tx_log {
   /* Record an insertion. The payload of the version will be
      embedded in the log record on disk and the version's
@@ -410,7 +461,7 @@ struct sm_log {
   LSN backup_redo_log_by_oid(LSN start_lsn, LSN end_lsn);
   void start_logbuf_redoers();
   void recover();
-  void enqueue_committed_xct(uint32_t worker_id, LSNType type, uint64_t lsn, uint64_t start_time,
+  void enqueue_committed_xct(uint32_t worker_id, rLSN &lsn_list, uint64_t start_time,
                              std::function<void(void*, bool)> callback = nullptr, void *context = nullptr);
   void set_upto_lsn(LSNType type, uint64_t lsn);
   void create_segment_file(segment_id *sid);

@@ -96,19 +96,22 @@ sm_log_alloc_mgr::~sm_log_alloc_mgr() {
 }
 
 void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
-                                             LSNType type,
-                                             uint64_t lsn,
+                                             rLSN &rlsn,
                                              uint64_t start_time,
                                              std::function<void(void *, bool)> callback,
                                              void *context) {
-  lsn = config::command_log ?
-                CommandLog::cmd_log->GetTlsOffset() : lsn;
-  _commit_queue[worker_id].push_back(type, lsn, start_time, callback, context);
+  // TODO(jianqiuz): Handle the command_log case
+  for (auto &v : rlsn._data) {
+    v.lsn = config::command_log ?
+                  CommandLog::cmd_log->GetTlsOffset() : v.lsn;
+  }
+
+  _commit_queue[worker_id].push_back(rlsn, start_time, callback, context);
 }
 
 // (jianqiuz) When pushing the lsn entry into commit pipelining queue,
 // it will see if we need to flush the queue.
-void sm_log_alloc_mgr::commit_queue::push_back(LSNType type, uint64_t lsn,
+void sm_log_alloc_mgr::commit_queue::push_back(rLSN &rlsn,
                                                uint64_t start_time,
                                                std::function<void(void *, bool)> callback,
                                                void *context) {
@@ -130,10 +133,10 @@ retry :
     }
     if (items < config::group_commit_queue_length) {
       uint32_t idx = (start + items) % config::group_commit_queue_length;
-      volatile_write(queue[idx].lsn, lsn);
+      // volatile_write(queue[idx].rlsn, rlsn);
+      queue[idx].rlsn = rlsn;
       volatile_write(queue[idx].start_time, start_time);
       volatile_write(queue[idx].context, context);
-      volatile_write(queue[idx].type, type);
       queue[idx].post_commit_callback = callback;
       volatile_write(items, items + 1);
       ASSERT(items == size());
@@ -158,7 +161,8 @@ void sm_log_alloc_mgr::dump_queue() {
       for(auto j = 0; j < size; j++) {
         uint32_t idx = (begin + j)  % config::group_commit_queue_length;
         auto entry = _commit_queue[i].queue[idx];
-        printf("Entry %d: Type = 0x%X, LSN = 0x%lX\n", j, entry.type, entry.lsn);
+        printf("Entry %d: ", j);
+        entry.rlsn.print(true);
       }
       printf("=END QUEUE %d=\n", i);
     }
@@ -177,21 +181,29 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
     uint32_t dequeue = 0;
     for (uint32_t j = 0; j < size; ++j) {
       uint32_t idx = (n + j) % config::group_commit_queue_length;
-      auto &entry = _commit_queue[i].queue[idx];
-      // FIXME(tzwang): make this general. For now it's only when the engine
-      // isn't ERMIA do we look at the array.
-      if (entry.type != LSNType::lsn_ermia) {
-        upto = upto_lsn_tbl[entry.type];
+      auto &raw_entry = _commit_queue[i].queue[idx];
+      auto rlsn = raw_entry.rlsn.list();
+      for (auto entry : rlsn) {
+        // FIXME(tzwang): make this general. For now it's only when the engine
+        // isn't ERMIA do we look at the array.
+        auto cmp_upto = upto;
+        if (entry.type != LSNType::lsn_ermia) {
+          cmp_upto = upto_lsn_tbl[entry.type];
+        }
+        if (volatile_read(entry.lsn) > cmp_upto) {
+          // Have to stop even if just one type is not catching up - here we only
+          // dequeue in consecutive batches.
+          break;
+        }
       }
-      if (volatile_read(entry.lsn) > upto) {
-        // Have to stop even if just one type is not catching up - here we only
-        // dequeue in consecutive batches.
-        break;
-      } else if (entry.context) {
-        fprintf(stderr, "[ERMIA] Dequeue entry %p with LSN 0x%lX, callback\n", &entry, entry.lsn);
-        entry.post_commit_callback(entry.context, false);
+      if (raw_entry.context) {
+#ifndef NDEBUG
+        fprintf(stderr, "[ERMIA] Dequeue entry %p with rLSN", &raw_entry);
+#endif
+        raw_entry.rlsn.print(true);
+        raw_entry.post_commit_callback(raw_entry.context, false);
       }
-      _commit_queue[i].total_latency_us += end_time - entry.start_time;
+      _commit_queue[i].total_latency_us += end_time - raw_entry.start_time;
       dequeue++;
     }
     _commit_queue[i].items -= dequeue;
