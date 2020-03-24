@@ -41,34 +41,33 @@ struct eLSN {
 struct rLSN {
     // enqueue_committed_xct may need to modify the data
     // so we keep it public only for this reason
-    std::vector<eLSN> _data;
+    static constexpr ssize_t MAX_ENGINE = 2;
+    eLSN _data[MAX_ENGINE];
 
     inline void push(uint64_t lsn, LSNType type) {
-      eLSN elsn;
+      ALWAYS_ASSERT(type != lsn_undefined);
+      eLSN &elsn = _data[type];
       elsn.lsn = lsn;
       elsn.type = type;
-      _data.push_back(elsn);
+      _data[type] = elsn;
     }
 
     inline void clear() {
-      _data.clear();
-    }
-
-    inline rLSN(const rLSN &other) {
-      printf("[VOID001] Copy constructor called\n");
-      auto &vec = other._data;
-      _data.clear();
-      for (auto v : vec) {
-        _data.push_back(v);
+      for (int i = 0; i < MAX_ENGINE; i++) {
+        _data[i].type = lsn_undefined;
       }
     }
 
     rLSN() {
-      _data.clear();
+      clear();
     }
 
     inline void print(bool newline = false) {
-      for (auto v : _data) {
+      for (int i = 0; i < MAX_ENGINE; i++) {
+        auto v = _data[i];
+        if (v.type == LSNType::lsn_undefined) {
+          continue;
+        }
         printf("<0x%lx, 0x%x>,", v.lsn, v.type);
       }
       if (newline) {
@@ -76,9 +75,6 @@ struct rLSN {
       }
     }
 
-    inline const std::vector<eLSN> &list() {
-      return _data;
-    }
 };
 
 struct sm_tx_log {

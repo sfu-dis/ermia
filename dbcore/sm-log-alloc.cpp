@@ -182,10 +182,14 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
     for (uint32_t j = 0; j < size; ++j) {
       uint32_t idx = (n + j) % config::group_commit_queue_length;
       auto &raw_entry = _commit_queue[i].queue[idx];
-      auto rlsn = raw_entry.rlsn.list();
-      for (auto entry : rlsn) {
+      auto rlsn = raw_entry.rlsn._data;
+      for (int i = 0; i < rLSN::MAX_ENGINE; i++) {
         // FIXME(tzwang): make this general. For now it's only when the engine
         // isn't ERMIA do we look at the array.
+        auto &entry = rlsn[i];
+        if (entry.type == LSNType::lsn_undefined) {
+          continue;
+        }
         auto cmp_upto = upto;
         if (entry.type != LSNType::lsn_ermia) {
           cmp_upto = upto_lsn_tbl[entry.type];
