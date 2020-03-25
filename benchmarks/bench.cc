@@ -74,7 +74,9 @@ bool bench_worker::finish_workload(rc_t ret, uint32_t workload_idx, util::timer 
     std::get<0>(txn_counts[workload_idx])++;
     if (!ermia::config::is_backup_srv() && ermia::config::group_commit) {
       uint64_t clsn = ermia::logmgr->get_tls_lsn_offset() & ~ermia::sm_log_alloc_mgr::kDirtyTlsLsnOffset;
-      ermia::logmgr->enqueue_committed_xct(worker_id, ermia::lsn_ermia, clsn, t.get_start());
+      ermia::rLSN rlsn;
+      rlsn.push(clsn, ermia::lsn_ermia);
+      ermia::logmgr->enqueue_committed_xct(worker_id, rlsn, t.get_start());
     } else {
       latency_numer_us += t.lap();
     }
