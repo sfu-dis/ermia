@@ -75,6 +75,15 @@ struct rLSN {
       }
     }
 
+    inline bool is_empty() {
+      for (int i = 0; i < MAX_ENGINE; i++) {
+        if (_data[i].type != lsn_undefined) {
+          return false;
+        }
+      }
+      return true;
+    }
+
 };
 
 struct sm_tx_log {

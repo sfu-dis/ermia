@@ -203,8 +203,9 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
       if (raw_entry.context) {
 #ifndef NDEBUG
         fprintf(stderr, "[ERMIA] Dequeue entry %p with rLSN", &raw_entry);
-#endif
         raw_entry.rlsn.print(true);
+#endif
+        // TODO(jianqiuz): Check if there is any early call here
         raw_entry.post_commit_callback(raw_entry.context, false);
       }
       _commit_queue[i].total_latency_us += end_time - raw_entry.start_time;
