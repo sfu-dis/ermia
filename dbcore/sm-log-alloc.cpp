@@ -171,9 +171,9 @@ void sm_log_alloc_mgr::dump_queue() {
 
 void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
                                               uint64_t end_time) {
-  uint32_t n = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
+  uint32_t nqueues = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
   bool printed = false;
-  for (uint32_t i = 0; i < n; i++) {
+  for (uint32_t i = 0; i < nqueues; i++) {
     CRITICAL_SECTION(cs, _commit_queue[i].lock);
     uint32_t n = volatile_read(_commit_queue[i].start);
     uint32_t size = _commit_queue[i].size();
@@ -183,10 +183,10 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
       uint32_t idx = (n + j) % config::group_commit_queue_length;
       auto &raw_entry = _commit_queue[i].queue[idx];
       auto rlsn = raw_entry.rlsn._data;
-      for (int i = 0; i < rLSN::MAX_ENGINE; i++) {
+      for (int k = 0; k < rLSN::MAX_ENGINE; k++) {
         // FIXME(tzwang): make this general. For now it's only when the engine
         // isn't ERMIA do we look at the array.
-        auto &entry = rlsn[i];
+        auto &entry = rlsn[k];
         if (entry.type == LSNType::lsn_undefined) {
           continue;
         }
@@ -203,8 +203,9 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
       if (raw_entry.context) {
 #ifndef NDEBUG
         fprintf(stderr, "[ERMIA] Dequeue entry %p with rLSN", &raw_entry);
-#endif
         raw_entry.rlsn.print(true);
+#endif
+        // TODO(jianqiuz): Check if there is any early call here
         raw_entry.post_commit_callback(raw_entry.context, false);
       }
       _commit_queue[i].total_latency_us += end_time - raw_entry.start_time;
