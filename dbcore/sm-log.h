@@ -467,7 +467,7 @@ struct sm_log {
   void start_logbuf_redoers();
   void recover();
   void enqueue_committed_xct(uint32_t worker_id, rLSN &lsn_list, uint64_t start_time,
-                             std::function<void(void*, bool)> callback = nullptr, void *context = nullptr);
+                             std::function<void(void*)> callback = nullptr, void *context = nullptr);
   void set_upto_lsn(LSNType type, uint64_t lsn);
   void create_segment_file(segment_id *sid);
   uint64_t durable_flushed_lsn_offset();

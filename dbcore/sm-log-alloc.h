@@ -82,7 +82,7 @@ struct sm_log_alloc_mgr {
   void PrimaryCommitPersistedWork(uint64_t new_offset);
   void BackupFlushLog(uint64_t new_dlsn_dlsn);
   uint64_t smallest_tls_lsn_offset();
-  void enqueue_committed_xct(uint32_t worker_id, rLSN &rlsn, uint64_t start_time, std::function<void(void *, bool)> callback, void *context = nullptr);
+  void enqueue_committed_xct(uint32_t worker_id, rLSN &rlsn, uint64_t start_time, std::function<void(void *)> callback, void *context = nullptr);
   void dequeue_committed_xcts(uint64_t up_to, uint64_t end_time);
   void set_upto_lsn(LSNType type, uint64_t lsn);
   int open_segment_for_read(segment_id * sid);
@@ -157,7 +157,7 @@ struct sm_log_alloc_mgr {
       rLSN rlsn;
       uint64_t start_time;
       void *context;    // Optional transaction context if needed (used by post_commit_callback)
-      std::function<void(void*, bool)> post_commit_callback;
+      std::function<void(void*)> post_commit_callback;
       Entry() : start_time(0), context(nullptr) {}
     };
     Entry *queue;
@@ -170,7 +170,7 @@ struct sm_log_alloc_mgr {
       queue = new Entry[config::group_commit_queue_length];
     }
     ~commit_queue() { delete[] queue; }
-    void push_back(rLSN &rlsn, uint64_t start_time, std::function<void(void *, bool)> callback, void *context);
+    void push_back(rLSN &rlsn, uint64_t start_time, std::function<void(void *)> callback, void *context);
     inline uint32_t size() { return items; }
   };
   commit_queue *_commit_queue CACHE_ALIGNED;

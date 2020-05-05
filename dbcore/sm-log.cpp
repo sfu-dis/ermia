@@ -70,7 +70,7 @@ void sm_log::BackupFlushLog(uint64_t new_dlsn_offset) {
 }
 
 void sm_log::enqueue_committed_xct(uint32_t worker_id, rLSN &rlsn, uint64_t start_time,
-                                   std::function<void(void *, bool)> callback, void *context) {
+                                   std::function<void(void *)> callback, void *context) {
   get_impl(this)->_lm.enqueue_committed_xct(worker_id, rlsn, start_time, callback, context);
 }
 
