@@ -98,7 +98,7 @@ sm_log_alloc_mgr::~sm_log_alloc_mgr() {
 void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
                                              rLSN &rlsn,
                                              uint64_t start_time,
-                                             std::function<void(void *, bool)> callback,
+                                             std::function<void(void *)> callback,
                                              void *context) {
   // TODO(jianqiuz): Handle the command_log case
   for (auto &v : rlsn._data) {
@@ -113,7 +113,7 @@ void sm_log_alloc_mgr::enqueue_committed_xct(uint32_t worker_id,
 // it will see if we need to flush the queue.
 void sm_log_alloc_mgr::commit_queue::push_back(rLSN &rlsn,
                                                uint64_t start_time,
-                                               std::function<void(void *, bool)> callback,
+                                               std::function<void(void *)> callback,
                                                void *context) {
   bool flush = false;
   bool insert = true;
@@ -200,13 +200,14 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
           break;
         }
       }
+      ALWAYS_ASSERT(raw_entry.context);
       if (raw_entry.context) {
 #ifndef NDEBUG
-        fprintf(stderr, "[ERMIA] Dequeue entry %p with rLSN", &raw_entry);
+        fprintf(stderr, "[ERMIA] Dequeue entry %p with context %p rLSN ", &raw_entry, raw_entry.context);
         raw_entry.rlsn.print(true);
 #endif
         // TODO(jianqiuz): Check if there is any early call here
-        raw_entry.post_commit_callback(raw_entry.context, false);
+        raw_entry.post_commit_callback(raw_entry.context);
       }
       _commit_queue[i].total_latency_us += end_time - raw_entry.start_time;
       dequeue++;
