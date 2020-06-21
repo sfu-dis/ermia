@@ -23,6 +23,7 @@ public:
 
   class ScanCallback {
   public:
+    int64_t limit = -1;
     virtual ~ScanCallback() {}
     virtual bool Invoke(const char *keyp, size_t keylen,
                         const varstr &value) = 0;
