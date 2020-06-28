@@ -104,6 +104,7 @@ void init() {
 
 void sanity_check() {
   LOG_IF(FATAL, tls_alloc && !threadpool) << "Cannot use TLS allocator without threadpool";
+  ALWAYS_ASSERT(log_redo_partitions);
   ALWAYS_ASSERT(recover_functor || is_backup_srv());
   ALWAYS_ASSERT(numa_nodes || !threadpool);
   ALWAYS_ASSERT(not group_commit or group_commit_queue_length);
