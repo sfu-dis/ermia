@@ -1,7 +1,10 @@
 #pragma once
 
 #include <assert.h>
-#include <malloc.h>
+// FIXME(jianqiuz): We remove malloc.h header due to conflict with
+// Innobase malloc definition, may need another way to handle it later
+// effect not tested yet
+// #include <malloc.h> 
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
