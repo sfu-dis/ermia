@@ -1052,5 +1052,41 @@ template <typename P> void mbtree<P>::print() { table_.print(); }
 
 typedef mbtree<masstree_params> ConcurrentMasstree;
 typedef mbtree<masstree_single_threaded_params> SingleThreadedMasstree;
-} // namespace mtt
 
+// XXX(jianqiuz): This callback is for raw masstree(key=varstr, value=uinptr_t) use.
+struct NoXIDSearchRangeCallback : public mtt::ConcurrentMasstree::low_level_search_range_callback {
+      NoXIDSearchRangeCallback(void *caller_callback) : caller_callback(caller_callback) {}
+
+  virtual void
+  on_resp_node(const typename mtt::ConcurrentMasstree::node_opaque_t *n,
+          uint64_t version) {
+      MARK_REFERENCED(n);
+      MARK_REFERENCED(version);
+      return ;
+  }
+  virtual bool invoke(const mtt::ConcurrentMasstree *btr_ptr,
+                      const typename mtt::ConcurrentMasstree::string_type &k,
+                      dbtuple *v,
+                      const typename mtt::ConcurrentMasstree::node_opaque_t *n,
+                      uint64_t version) {
+      // FIXME(jianqiuz): We don't need to implement this now.
+      MARK_REFERENCED(btr_ptr);
+      MARK_REFERENCED(k);
+      MARK_REFERENCED(v);
+      MARK_REFERENCED(n);
+      MARK_REFERENCED(version);
+      return false;
+  }
+  virtual bool invoke(const typename mtt::ConcurrentMasstree::string_type &k,
+          uintptr_t oid, uint64_t version) {
+      MARK_REFERENCED(k);
+      MARK_REFERENCED(oid);
+      MARK_REFERENCED(version);
+      return false;
+  }
+
+private:
+  void *const caller_callback;
+};
+
+} // namespace mtt
