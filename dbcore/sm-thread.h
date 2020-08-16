@@ -53,7 +53,7 @@ inline uint32_t get_tls_lsn_offset_idx(uint64_t *_tls_lsn_offset, bool is_cleanu
     if (idx == INVALID_SLOT_IDX) {
         while(true) {
             idx = next_slot_idx.fetch_add(1) % config::max_threads;
-            if (&_tls_lsn_offset[idx]) {
+            if (_tls_lsn_offset[idx]) {
                 continue;
             }
             bool ok = __atomic_compare_exchange_n(&_tls_lsn_offset[idx], &FREE_SLOT, OCCUPIED_SLOT, false,
