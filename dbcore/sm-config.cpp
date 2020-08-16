@@ -23,6 +23,8 @@ bool parallel_loading = false;
 bool retry_aborted_transactions = false;
 bool quick_bench_start = false;
 bool wait_for_primary = true;
+// TODO(jianqiuz): Add command line argument.
+uint64_t max_threads = config::MAX_THREADS;
 int backoff_aborted_transactions = 0;
 int numa_nodes = 0;
 int enable_gc = 0;

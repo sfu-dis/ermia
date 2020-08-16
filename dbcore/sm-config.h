@@ -70,6 +70,7 @@ extern uint64_t group_commit_bytes;
 extern uint32_t benchmark_seconds;
 extern bool quick_bench_start;
 extern bool wait_for_primary;
+extern uint64_t max_threads;
 extern int replay_policy;
 extern uint32_t replay_threads;
 extern bool persist_nvram_on_replay;

@@ -27,11 +27,20 @@ namespace ermia {
 uint64_t sm_log_alloc_mgr::commit_queue::total_latency_us = 0;
 
 void sm_log_alloc_mgr::set_tls_lsn_offset(uint64_t offset) {
-  volatile_write(_tls_lsn_offset[thread::MyId()], offset);
+  volatile_write(_tls_lsn_offset[thread::get_tls_lsn_offset_idx(_tls_lsn_offset)], offset);
 }
 
 uint64_t sm_log_alloc_mgr::get_tls_lsn_offset() {
-  return volatile_read(_tls_lsn_offset[thread::MyId()]);
+  return volatile_read(_tls_lsn_offset[thread::get_tls_lsn_offset_idx(_tls_lsn_offset)]);
+}
+
+void sm_log_alloc_mgr::free_tls_lsn_slot() {
+    auto idx = thread::get_tls_lsn_offset_idx(_tls_lsn_offset, true);
+    if (idx != thread::INVALID_SLOT_IDX) {
+        LOG(INFO) << "Free slot: " << idx << " thread: " << std::this_thread::get_id();
+        volatile_write(_tls_lsn_offset[idx], 0);
+        thread::next_slot_idx.store(idx, std::memory_order_relaxed);
+    }
 }
 
 void sm_log_alloc_mgr::set_upto_lsn(LSNType type, uint64_t lsn) {
@@ -66,9 +75,10 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
   _logbuf->_head = _logbuf->_tail = get_starting_byte_offset(&_lm);
   if (!config::is_backup_srv() || (config::command_log && config::replay_threads)) {
     _tls_lsn_offset =
-        (uint64_t *)malloc(sizeof(uint64_t) * config::MAX_THREADS);
-    memset(_tls_lsn_offset, 0, sizeof(uint64_t) * config::MAX_THREADS);
+        (uint64_t *)malloc(sizeof(uint64_t) * config::max_threads);
+    memset(_tls_lsn_offset, 0, sizeof(uint64_t) * config::max_threads);
 
+    // XXX(jianqiuz): Try to raise the contention on the commit queue.
     uint32_t n = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
     _commit_queue = new commit_queue[n];
     for (uint32_t i = 0; i < n; ++i) {
@@ -699,7 +709,7 @@ log_allocation *sm_log_alloc_mgr::allocate(uint32_t nrec,
    yet know what segment (if any) actually contains that offset.
  */
 
-  uint64_t *my_off = &_tls_lsn_offset[thread::MyId()];
+  uint64_t *my_off = &_tls_lsn_offset[thread::get_tls_lsn_offset_idx(_tls_lsn_offset)];
   volatile_write(*my_off, *my_off | kDirtyTlsLsnOffset);
 
 start_over:
@@ -856,9 +866,9 @@ uint64_t sm_log_alloc_mgr::smallest_tls_lsn_offset() {
   bool found = false;
   uint64_t min_dirty = _lsn_offset;
   uint64_t max_clean = 0;
-  for (uint32_t i = 0; i < thread::next_thread_id; i++) {
+  for (uint32_t i = 0; i < config::max_threads; i++) {
     uint64_t off = volatile_read(_tls_lsn_offset[i]);
-    if (off) {
+    if (off && off != thread::OCCUPIED_SLOT) {
       if (off & kDirtyTlsLsnOffset) {
         min_dirty = std::min(off & ~kDirtyTlsLsnOffset, min_dirty);
         found = true;

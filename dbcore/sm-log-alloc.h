@@ -26,6 +26,7 @@ struct sm_log_alloc_mgr {
   ~sm_log_alloc_mgr();
 
   void set_tls_lsn_offset(uint64_t offset);
+  void free_tls_lsn_slot();
   uint64_t get_tls_lsn_offset();
 
   /* Kick the log writer daemon and wait for it to finish flushing
