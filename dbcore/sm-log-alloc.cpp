@@ -18,6 +18,11 @@ extern "C" void *log_write_daemon_thunk(void *arg) {
   return NULL;
 }
 
+// extern "C" void *dequeue_committed_xcts_multithreaded_thunk(void *arg) {
+//   ((ermia::sm_log_alloc_mgr *)arg)->dequeue_committed_xcts_multithreaded();
+//   return NULL;
+// }
+
 enum { DAEMON_HAS_WORK = 0x1, DAEMON_SLEEPING = 0x2 };
 
 }  // end anonymous namespace
@@ -93,6 +98,14 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
     int err =
         pthread_create(&_write_daemon_tid, NULL, &log_write_daemon_thunk, this);
     THROW_IF(err, os_error, err, "Unable to start log writer daemon thread");
+
+    // XXX(khuang): Concurrently dequeue committed transactions.
+    _dequeue_tids = new std::thread[config::dequeue_threads];
+    for (uint32_t i = 0; i < config::dequeue_threads; ++i) {
+      _dequeue_tids[i] = std::thread(&sm_log_alloc_mgr::dequeue_committed_xcts_multithreaded, this);
+      _dequeue_threads_map.insert({_dequeue_tids[i].get_id(), i});
+      _dequeue_threads_status.insert({_dequeue_tids[i].get_id(), false});
+    }
   }
   for(auto i = 0; i < LSNType::count; i++) {
     std::atomic_init(upto_lsn_tbl + i, static_cast<uint64_t>(0));
@@ -101,6 +114,10 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
 
 sm_log_alloc_mgr::~sm_log_alloc_mgr() {
   _write_daemon_should_stop = true;
+  for (uint32_t i = 0; i < config::dequeue_threads; ++i) {
+    _dequeue_tids[i].join();
+  }
+  delete[] _dequeue_tids;
   int err = pthread_join(_write_daemon_tid, NULL);
   LOG_IF(FATAL, err) << "Unable to join log writer daemon thread";
 }
@@ -224,6 +241,78 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
     }
     _commit_queue[i].items -= dequeue;
     volatile_write(_commit_queue[i].start, (n + dequeue) % config::group_commit_queue_length);
+  }
+}
+
+void sm_log_alloc_mgr::dequeue_committed_xcts_multithreaded() {
+  uint64_t upto = _upto;
+  uint64_t end_time = _end_time;
+  uint32_t nqueues = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
+  bool printed = false;
+  uint32_t dequeue_tid = _dequeue_threads_map[std::this_thread::get_id()];
+
+  while (true) {
+    std::unique_lock<std::mutex> dequeue_lock(_wait_dequeue_mutex);
+    _dequeue_cv.wait(dequeue_lock,[this]{
+      return _dequeue_threads_status[std::this_thread::get_id()];
+    });
+
+    for (uint32_t i = 0; i < nqueues; i++) {
+      if (dequeue_tid != i % config::dequeue_threads) {
+        continue;
+      }
+
+      CRITICAL_SECTION(cs, _commit_queue[i].lock);
+      uint32_t n = volatile_read(_commit_queue[i].start);
+      uint32_t size = _commit_queue[i].size();
+
+      uint32_t dequeue = 0;
+      for (uint32_t j = 0; j < size; ++j) {
+        uint32_t idx = (n + j) % config::group_commit_queue_length;
+        auto &raw_entry = _commit_queue[i].queue[idx];
+        auto rlsn = raw_entry.rlsn._data;
+        for (int k = 0; k < rLSN::MAX_ENGINE; k++) {
+          // FIXME(tzwang): make this general. For now it's only when the engine
+          // isn't ERMIA do we look at the array.
+          auto &entry = rlsn[k];
+          if (entry.type == LSNType::lsn_undefined) {
+            continue;
+          }
+          auto cmp_upto = upto;
+          if (entry.type != LSNType::lsn_ermia) {
+            cmp_upto = upto_lsn_tbl[entry.type];
+          }
+          if (volatile_read(entry.lsn) > cmp_upto) {
+            // Have to stop even if just one type is not catching up - here we only
+            // dequeue in consecutive batches.
+            break;
+          }
+        }
+        ALWAYS_ASSERT(raw_entry.context);
+        if (raw_entry.context) {
+  #ifndef NDEBUG
+          fprintf(stderr, "[ERMIA] Dequeue entry %p with context %p rLSN ", &raw_entry, raw_entry.context);
+          raw_entry.rlsn.print(true);
+  #endif
+          // TODO(jianqiuz): Check if there is any early call here
+          raw_entry.post_commit_callback(raw_entry.context);
+        }
+        _commit_queue[i].total_latency_us += end_time - raw_entry.start_time;
+        dequeue++;
+      }
+      _commit_queue[i].items -= dequeue;
+      volatile_write(_commit_queue[i].start, (n + dequeue) % config::group_commit_queue_length);
+    }
+
+    _dequeue_threads_status[std::this_thread::get_id()] = false;
+    dequeue_lock.unlock();
+  }
+}
+
+void sm_log_alloc_mgr::set_dequeue_threads_status(bool wake) {
+  std::map<std::thread::id, bool>::iterator it;
+  for (it = _dequeue_threads_status.begin(); it != _dequeue_threads_status.end(); ++it) {
+    it->second = wake;
   }
 }
 
@@ -895,6 +984,7 @@ void sm_log_alloc_mgr::_log_write_daemon() {
   static uint64_t const DURABLE_MARK_TIMEOUT_NS = uint64_t(5000) * 1000 * 1000;
   uint64_t last_dmark = stopwatch_t::now();
   while (true) {
+    std::unique_lock<std::mutex> dequeue_lock(_wait_dequeue_mutex);
     uint64_t cur_offset = cur_lsn_offset();
     uint64_t min_tls = smallest_tls_lsn_offset();
     uint64_t new_dlsn_offset = min_tls;
@@ -919,7 +1009,11 @@ void sm_log_alloc_mgr::_log_write_daemon() {
       // For the case in pipelined commit where no LSN change but there are other
       // items added to it (e.g., DDL) only 
       util::timer t;
-      dequeue_committed_xcts(new_dlsn_offset, t.get_start());
+      _upto = new_dlsn_offset;
+      _end_time = t.get_start();
+      set_dequeue_threads_status(true);
+      _dequeue_cv.notify_all();
+      // dequeue_committed_xcts(new_dlsn_offset, t.get_start());
     }
 
     /* Having completed a round of writes, notify waiting threads
@@ -984,7 +1078,11 @@ void sm_log_alloc_mgr::_log_write_daemon() {
           // Note that this is only a temporary solution for things that won't
           // generate a log record and their lsn recorded in the queue is 0
           util::timer t;
-          dequeue_committed_xcts(_durable_flushed_lsn_offset, t.get_start());
+          _upto = _durable_flushed_lsn_offset;
+          _end_time = t.get_start();
+          set_dequeue_threads_status(true);
+          _dequeue_cv.notify_all();
+          // dequeue_committed_xcts(_durable_flushed_lsn_offset, t.get_start());
           if (ret == ETIMEDOUT) {
             // We run out of time, stop sleeping and wake up once
             break;

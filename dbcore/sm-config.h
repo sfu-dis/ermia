@@ -44,6 +44,7 @@ extern bool print_cpu_util;
 extern uint32_t arena_size_mb;
 extern bool enable_perf;
 extern std::string perf_record_event;
+extern uint32_t dequeue_threads;
 
 // NVRAM settings - for backup servers only, the primary doesn't care.
 extern bool nvram_log_buffer;

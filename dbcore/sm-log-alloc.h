@@ -1,6 +1,9 @@
 #pragma once
 
 #include <deque>
+#include <map>
+#include <condition_variable>
+#include <mutex>
 #include "sm-log-recover.h"
 
 namespace ermia {
@@ -85,6 +88,8 @@ struct sm_log_alloc_mgr {
   uint64_t smallest_tls_lsn_offset();
   void enqueue_committed_xct(uint32_t worker_id, rLSN &rlsn, uint64_t start_time, std::function<void(void *)> callback, void *context = nullptr);
   void dequeue_committed_xcts(uint64_t up_to, uint64_t end_time);
+  void dequeue_committed_xcts_multithreaded();
+  void set_dequeue_threads_status(bool wake);
   void set_upto_lsn(LSNType type, uint64_t lsn);
   int open_segment_for_read(segment_id * sid);
 
@@ -105,6 +110,14 @@ struct sm_log_alloc_mgr {
 
   bool _write_daemon_should_wake;
   bool _write_daemon_should_stop;
+
+  std::thread *_dequeue_tids;
+  std::map<std::thread::id, uint32_t> _dequeue_threads_map;
+  std::map<std::thread::id, bool> _dequeue_threads_status;
+  std::mutex _wait_dequeue_mutex;
+  std::condition_variable _dequeue_cv;
+  uint64_t _upto;
+  uint64_t _end_time;
 
   // tzwang: use one _tls_lsn_offset per worker thread to record its
   // most-recently committed/aborted transaction's log lsn offset. This array
