@@ -111,11 +111,14 @@ struct sm_log_alloc_mgr {
   bool _write_daemon_should_wake;
   bool _write_daemon_should_stop;
 
-  std::thread *_dequeue_tids;
+  std::thread *_dequeue_threads;
   std::map<std::thread::id, uint32_t> _dequeue_threads_map;
   std::map<std::thread::id, bool> _dequeue_threads_status;
   std::mutex _wait_dequeue_mutex;
+  std::mutex _wake_write_daemon_mutex;
   std::condition_variable _dequeue_cv;
+  std::condition_variable _wake_write_daemon_cv;
+  std::atomic<uint32_t> _dequeue_finished_counter;
   uint64_t _upto;
   uint64_t _end_time;
 
