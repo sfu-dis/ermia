@@ -88,7 +88,7 @@ struct sm_log_alloc_mgr {
   uint64_t smallest_tls_lsn_offset();
   void enqueue_committed_xct(uint32_t worker_id, rLSN &rlsn, uint64_t start_time, std::function<void(void *)> callback, void *context = nullptr);
   void dequeue_committed_xcts(uint64_t up_to, uint64_t end_time);
-  void dequeue_committed_xcts_multithreaded();
+  void dequeue_committed_xcts_multithreaded(uint32_t tid);
   void set_dequeue_threads_status(bool wake);
   void set_upto_lsn(LSNType type, uint64_t lsn);
   int open_segment_for_read(segment_id * sid);
@@ -112,8 +112,7 @@ struct sm_log_alloc_mgr {
   bool _write_daemon_should_stop;
 
   std::thread *_dequeue_threads;
-  std::map<std::thread::id, uint32_t> _dequeue_threads_map;
-  std::map<std::thread::id, bool> _dequeue_threads_status;
+  std::map<uint32_t, bool> _dequeue_threads_status;
   std::mutex _wait_dequeue_mutex;
   std::mutex _wake_write_daemon_mutex;
   std::condition_variable _dequeue_cv;

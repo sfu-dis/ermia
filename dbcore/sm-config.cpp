@@ -85,7 +85,7 @@ uint32_t dia_logical_index_threads = 0;
 uint32_t dia_physical_index_threads = 0;
 bool amac_version_chain = false;
 bool numa_spread = false;
-uint32_t dequeue_threads = 1;
+uint32_t dequeue_threads = 2;
 
 void init() {
   ALWAYS_ASSERT(threads);
