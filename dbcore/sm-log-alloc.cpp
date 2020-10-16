@@ -91,16 +91,17 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
     _write_daemon_mutex.lock();
     DEFER(_write_daemon_mutex.unlock());
 
-    int err =
-        pthread_create(&_write_daemon_tid, NULL, &log_write_daemon_thunk, this);
-    THROW_IF(err, os_error, err, "Unable to start log writer daemon thread");
-
     // XXX(khuang): Concurrently dequeue committed transactions.
     _dequeue_threads = new std::thread[config::dequeue_threads];
     for (uint32_t i = 0; i < config::dequeue_threads; ++i) {
       _dequeue_threads_status.insert({i, false});
       _dequeue_threads[i] = std::thread(&sm_log_alloc_mgr::dequeue_committed_xcts_multithreaded, this, i);
+      DLOG(INFO) << "[khuang] creating dequeue thread" << i;
     }
+
+    int err =
+        pthread_create(&_write_daemon_tid, NULL, &log_write_daemon_thunk, this);
+    THROW_IF(err, os_error, err, "Unable to start log writer daemon thread");
   }
   for(auto i = 0; i < LSNType::count; i++) {
     std::atomic_init(upto_lsn_tbl + i, static_cast<uint64_t>(0));
@@ -300,18 +301,19 @@ void sm_log_alloc_mgr::dequeue_committed_xcts_multithreaded(uint32_t tid) {
       volatile_write(_commit_queue[i].start, (n + dequeue) % config::group_commit_queue_length);
     }
 
+    DLOG(INFO) << "[khuang] tid"<< dequeue_tid << " finished dequeueing.";
     _dequeue_threads_status[dequeue_tid] = false;
     _dequeue_finished_counter.fetch_add(1, std::memory_order_relaxed);
     dequeue_lock.unlock();
 
     std::unique_lock<std::mutex> write_daemon_lock(_wake_write_daemon_mutex);
+    DLOG(INFO) << "[khuang] tid"<< dequeue_tid << " notify _log_write_daemon.";
     _wake_write_daemon_cv.notify_one();
     write_daemon_lock.unlock();
   }
 }
 
 void sm_log_alloc_mgr::set_dequeue_threads_status(bool wake) {
-  // std::map<std::thread::id, bool>::iterator it;
   DLOG(INFO) << "[khuang] resetting status, total threads: " << _dequeue_threads_status.size();
   for (auto it = _dequeue_threads_status.begin(); it != _dequeue_threads_status.end(); ++it) {
     it->second = wake;
@@ -1022,11 +1024,11 @@ void sm_log_alloc_mgr::_log_write_daemon() {
       DLOG(INFO) << "[khuang] waiting for dequeue threads to finish, finished: " << _dequeue_finished_counter << " config: " << config::dequeue_threads;
       std::unique_lock<std::mutex> write_daemon_lock(_wake_write_daemon_mutex);
       _wake_write_daemon_cv.wait(write_daemon_lock, [this]{
+        DLOG(INFO) << "[khuang] _log_write_daemon gets notified.";
         return _dequeue_finished_counter == config::dequeue_threads;
       });
-      DLOG(INFO) << "[khuang] dequeue_threads finished, finished: " << _dequeue_finished_counter << " config: " << config::dequeue_threads;
+      DLOG(INFO) << "[khuang] all the dequeue_threads finished, finished: " << _dequeue_finished_counter << " config: " << config::dequeue_threads;
       write_daemon_lock.unlock();
-      DLOG(INFO) << "[khuang] write_daemon_lock unlocked, finished: " << _dequeue_finished_counter << " config: " << config::dequeue_threads;
       // dequeue_committed_xcts(new_dlsn_offset, t.get_start());
     }
 
@@ -1100,9 +1102,10 @@ void sm_log_alloc_mgr::_log_write_daemon() {
           _dequeue_finished_counter.store(0, std::memory_order_relaxed);
           _dequeue_cv.notify_all();
           dequeue_lock.unlock();
-          DLOG(INFO) << "[khuang] spin wait on dequeue_threads, finished: " << _dequeue_finished_counter << " config: " << config::dequeue_threads;
+          DLOG(INFO) << "[khuang] wait on dequeue_threads, finished: " << _dequeue_finished_counter << " config: " << config::dequeue_threads;
           std::unique_lock<std::mutex> write_daemon_lock(_wake_write_daemon_mutex);
           _wake_write_daemon_cv.wait(write_daemon_lock, [this]{
+            DLOG(INFO) << "[khuang] _log_write_daemon gets notified.";
             return _dequeue_finished_counter == config::dequeue_threads;
           });
           write_daemon_lock.unlock();
