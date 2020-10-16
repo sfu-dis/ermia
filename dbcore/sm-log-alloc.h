@@ -111,6 +111,7 @@ struct sm_log_alloc_mgr {
   bool _write_daemon_should_wake;
   bool _write_daemon_should_stop;
 
+  uint32_t _dequeue_thread_number;
   std::thread *_dequeue_threads;
   std::map<uint32_t, bool> _dequeue_threads_status;
   std::mutex _wait_dequeue_mutex;
