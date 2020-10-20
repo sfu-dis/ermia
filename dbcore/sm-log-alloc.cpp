@@ -27,11 +27,20 @@ namespace ermia {
 uint64_t sm_log_alloc_mgr::commit_queue::total_latency_us = 0;
 
 void sm_log_alloc_mgr::set_tls_lsn_offset(uint64_t offset) {
-  volatile_write(_tls_lsn_offset[thread::MyId()], offset);
+  volatile_write(_tls_lsn_offset[thread::get_tls_lsn_offset_idx(_tls_lsn_offset)], offset);
 }
 
 uint64_t sm_log_alloc_mgr::get_tls_lsn_offset() {
-  return volatile_read(_tls_lsn_offset[thread::MyId()]);
+  return volatile_read(_tls_lsn_offset[thread::get_tls_lsn_offset_idx(_tls_lsn_offset)]);
+}
+
+void sm_log_alloc_mgr::free_tls_lsn_slot() {
+    auto idx = thread::get_tls_lsn_offset_idx(_tls_lsn_offset, true);
+    if (idx != thread::INVALID_SLOT_IDX) {
+        LOG(INFO) << "Free slot: " << idx << " thread: " << std::this_thread::get_id();
+        volatile_write(_tls_lsn_offset[idx], 0);
+        thread::next_slot_idx.store(idx, std::memory_order_relaxed);
+    }
 }
 
 void sm_log_alloc_mgr::set_upto_lsn(LSNType type, uint64_t lsn) {
@@ -57,6 +66,7 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
       _waiting_for_dmark(false),
       _write_daemon_should_wake(false),
       _write_daemon_should_stop(false),
+      _dequeue_finished_counter(0),
       _lsn_offset(_lm.get_durable_mark().offset()) {
   _logbuf_partition_size =
       config::log_buffer_mb * config::MB / config::log_redo_partitions;
@@ -66,15 +76,24 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
   _logbuf->_head = _logbuf->_tail = get_starting_byte_offset(&_lm);
   if (!config::is_backup_srv() || (config::command_log && config::replay_threads)) {
     _tls_lsn_offset =
-        (uint64_t *)malloc(sizeof(uint64_t) * config::MAX_THREADS);
-    memset(_tls_lsn_offset, 0, sizeof(uint64_t) * config::MAX_THREADS);
+        (uint64_t *)malloc(sizeof(uint64_t) * config::max_threads);
+    memset(_tls_lsn_offset, 0, sizeof(uint64_t) * config::max_threads);
 
+    // XXX(jianqiuz): Try to raise the contention on the commit queue.
     uint32_t n = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
     _commit_queue = new commit_queue[n];
     for (uint32_t i = 0; i < n; ++i) {
       _commit_queue[i].lm = this;
     }
     LOG(INFO) << "Created " << n << " commit queues";
+
+    // XXX(khuang): Concurrently dequeue committed transactions.
+    // The dequeue threads have to be initialized before the log write daemon.
+    _dequeue_threads = new std::thread[config::dequeue_threads];
+    for (uint32_t i = 0; i < config::dequeue_threads; ++i) {
+      _dequeue_threads_status.insert({i, false});
+      _dequeue_threads[i] = std::thread(&sm_log_alloc_mgr::dequeue_committed_xcts_multithreaded, this, i);
+    }
 
     // fire up the log writing daemon
     _write_daemon_mutex.lock();
@@ -91,6 +110,10 @@ sm_log_alloc_mgr::sm_log_alloc_mgr(sm_log_recover_impl *rf, void *rfn_arg)
 
 sm_log_alloc_mgr::~sm_log_alloc_mgr() {
   _write_daemon_should_stop = true;
+  for (uint32_t i = 0; i < config::dequeue_threads; ++i) {
+    _dequeue_threads[i].join();
+  }
+  delete[] _dequeue_threads;
   int err = pthread_join(_write_daemon_tid, NULL);
   LOG_IF(FATAL, err) << "Unable to join log writer daemon thread";
 }
@@ -214,6 +237,85 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
     }
     _commit_queue[i].items -= dequeue;
     volatile_write(_commit_queue[i].start, (n + dequeue) % config::group_commit_queue_length);
+  }
+}
+
+void sm_log_alloc_mgr::dequeue_committed_xcts_multithreaded(uint32_t tid) {
+  uint32_t nqueues = config::is_backup_srv() ? config::replay_threads : config::worker_threads;
+  bool printed = false;
+  uint32_t dequeue_tid = tid;
+
+  while (true) {
+    std::unique_lock<std::mutex> dequeue_lock(_wait_dequeue_mutex);
+    _dequeue_cv.wait(dequeue_lock,[this, dequeue_tid]{
+      return _dequeue_threads_status[dequeue_tid];
+    });
+
+    uint64_t upto = _durable_flushed_lsn_offset;
+    util::timer t;
+    uint64_t end_time = t.get_start();
+
+    for (uint32_t i = 0; i < nqueues; i++) {
+      if (dequeue_tid != i % config::dequeue_threads) {
+        continue;
+      }
+
+      CRITICAL_SECTION(cs, _commit_queue[i].lock);
+      uint32_t n = volatile_read(_commit_queue[i].start);
+      uint32_t size = _commit_queue[i].size();
+
+      uint32_t dequeue = 0;
+      for (uint32_t j = 0; j < size; ++j) {
+        uint32_t idx = (n + j) % config::group_commit_queue_length;
+        auto &raw_entry = _commit_queue[i].queue[idx];
+        auto rlsn = raw_entry.rlsn._data;
+        for (int k = 0; k < rLSN::MAX_ENGINE; k++) {
+          // FIXME(tzwang): make this general. For now it's only when the engine
+          // isn't ERMIA do we look at the array.
+          auto &entry = rlsn[k];
+          if (entry.type == LSNType::lsn_undefined) {
+            continue;
+          }
+          auto cmp_upto = upto;
+          if (entry.type != LSNType::lsn_ermia) {
+            cmp_upto = upto_lsn_tbl[entry.type];
+          }
+          if (volatile_read(entry.lsn) > cmp_upto) {
+            // Have to stop even if just one type is not catching up - here we only
+            // dequeue in consecutive batches.
+            break;
+          }
+        }
+        ALWAYS_ASSERT(raw_entry.context);
+        if (raw_entry.context) {
+  #ifndef NDEBUG
+          fprintf(stderr, "[ERMIA] Dequeue entry %p with context %p rLSN ", &raw_entry, raw_entry.context);
+          raw_entry.rlsn.print(true);
+  #endif
+          // TODO(jianqiuz): Check if there is any early call here
+          raw_entry.post_commit_callback(raw_entry.context);
+        }
+        _commit_queue[i].total_latency_us += end_time - raw_entry.start_time;
+        dequeue++;
+      }
+      _commit_queue[i].items -= dequeue;
+      volatile_write(_commit_queue[i].start, (n + dequeue) % config::group_commit_queue_length);
+    }
+
+    // The thread has finished this round of dequeueing and should sleep.
+    _dequeue_threads_status[dequeue_tid] = false;
+    _dequeue_finished_counter.fetch_add(1, std::memory_order_relaxed);
+    dequeue_lock.unlock();
+
+    std::unique_lock<std::mutex> write_daemon_lock(_wake_write_daemon_mutex);
+    _wake_write_daemon_cv.notify_one();
+    write_daemon_lock.unlock();
+  }
+}
+
+void sm_log_alloc_mgr::set_dequeue_threads_status(bool wake) {
+  for (auto it = _dequeue_threads_status.begin(); it != _dequeue_threads_status.end(); ++it) {
+    it->second = wake;
   }
 }
 
@@ -699,7 +801,7 @@ log_allocation *sm_log_alloc_mgr::allocate(uint32_t nrec,
    yet know what segment (if any) actually contains that offset.
  */
 
-  uint64_t *my_off = &_tls_lsn_offset[thread::MyId()];
+  uint64_t *my_off = &_tls_lsn_offset[thread::get_tls_lsn_offset_idx(_tls_lsn_offset)];
   volatile_write(*my_off, *my_off | kDirtyTlsLsnOffset);
 
 start_over:
@@ -856,9 +958,9 @@ uint64_t sm_log_alloc_mgr::smallest_tls_lsn_offset() {
   bool found = false;
   uint64_t min_dirty = _lsn_offset;
   uint64_t max_clean = 0;
-  for (uint32_t i = 0; i < thread::next_thread_id; i++) {
+  for (uint32_t i = 0; i < config::max_threads; i++) {
     uint64_t off = volatile_read(_tls_lsn_offset[i]);
-    if (off) {
+    if (off && off != thread::OCCUPIED_SLOT) {
       if (off & kDirtyTlsLsnOffset) {
         min_dirty = std::min(off & ~kDirtyTlsLsnOffset, min_dirty);
         found = true;
@@ -907,9 +1009,18 @@ void sm_log_alloc_mgr::_log_write_daemon() {
       durable_sid = PrimaryFlushLog(new_dlsn_offset);
     } else {
       // For the case in pipelined commit where no LSN change but there are other
-      // items added to it (e.g., DDL) only 
-      util::timer t;
-      dequeue_committed_xcts(new_dlsn_offset, t.get_start());
+      // items added to it (e.g., DDL) only
+      std::unique_lock<std::mutex> dequeue_lock(_wait_dequeue_mutex);
+      // Wake up all the dequeue threads.
+      set_dequeue_threads_status(true);
+      _dequeue_finished_counter.store(0, std::memory_order_relaxed);
+      _dequeue_cv.notify_all();
+      dequeue_lock.unlock();
+      std::unique_lock<std::mutex> write_daemon_lock(_wake_write_daemon_mutex);
+      _wake_write_daemon_cv.wait(write_daemon_lock, [this]{
+        return _dequeue_finished_counter == config::dequeue_threads;
+      });
+      write_daemon_lock.unlock();
     }
 
     /* Having completed a round of writes, notify waiting threads
@@ -973,8 +1084,17 @@ void sm_log_alloc_mgr::_log_write_daemon() {
           // Will sleep again. Check the commit queue before that
           // Note that this is only a temporary solution for things that won't
           // generate a log record and their lsn recorded in the queue is 0
-          util::timer t;
-          dequeue_committed_xcts(_durable_flushed_lsn_offset, t.get_start());
+          std::unique_lock<std::mutex> dequeue_lock(_wait_dequeue_mutex);
+          // Wake up all the dequeue threads.
+          set_dequeue_threads_status(true);
+          _dequeue_finished_counter.store(0, std::memory_order_relaxed);
+          _dequeue_cv.notify_all();
+          dequeue_lock.unlock();
+          std::unique_lock<std::mutex> write_daemon_lock(_wake_write_daemon_mutex);
+          _wake_write_daemon_cv.wait(write_daemon_lock, [this]{
+            return _dequeue_finished_counter == config::dequeue_threads;
+          });
+          write_daemon_lock.unlock();
           if (ret == ETIMEDOUT) {
             // We run out of time, stop sleeping and wake up once
             break;

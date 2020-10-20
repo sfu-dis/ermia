@@ -8,6 +8,7 @@ namespace ermia {
 namespace thread {
 
 std::atomic<uint32_t> next_thread_id(0);
+std::atomic<uint32_t> next_slot_idx{0};
 PerNodeThreadPool *thread_pools = nullptr;
 thread_local bool thread_initialized CACHE_ALIGNED;
 uint32_t PerNodeThreadPool::max_threads_per_node = 0;

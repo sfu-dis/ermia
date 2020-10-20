@@ -23,6 +23,8 @@ bool parallel_loading = false;
 bool retry_aborted_transactions = false;
 bool quick_bench_start = false;
 bool wait_for_primary = true;
+// TODO(jianqiuz): Add command line argument.
+uint64_t max_threads = config::MAX_THREADS;
 int backoff_aborted_transactions = 0;
 int numa_nodes = 0;
 int enable_gc = 0;
@@ -83,6 +85,7 @@ uint32_t dia_logical_index_threads = 0;
 uint32_t dia_physical_index_threads = 0;
 bool amac_version_chain = false;
 bool numa_spread = false;
+uint32_t dequeue_threads = 1;
 
 void init() {
   ALWAYS_ASSERT(threads);
@@ -104,6 +107,7 @@ void init() {
 
 void sanity_check() {
   LOG_IF(FATAL, tls_alloc && !threadpool) << "Cannot use TLS allocator without threadpool";
+  ALWAYS_ASSERT(log_redo_partitions);
   ALWAYS_ASSERT(recover_functor || is_backup_srv());
   ALWAYS_ASSERT(numa_nodes || !threadpool);
   ALWAYS_ASSERT(not group_commit or group_commit_queue_length);

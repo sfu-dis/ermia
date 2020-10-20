@@ -1,6 +1,9 @@
 #pragma once
 
 #include <deque>
+#include <map>
+#include <condition_variable>
+#include <mutex>
 #include "sm-log-recover.h"
 
 namespace ermia {
@@ -26,6 +29,7 @@ struct sm_log_alloc_mgr {
   ~sm_log_alloc_mgr();
 
   void set_tls_lsn_offset(uint64_t offset);
+  void free_tls_lsn_slot();
   uint64_t get_tls_lsn_offset();
 
   /* Kick the log writer daemon and wait for it to finish flushing
@@ -84,6 +88,8 @@ struct sm_log_alloc_mgr {
   uint64_t smallest_tls_lsn_offset();
   void enqueue_committed_xct(uint32_t worker_id, rLSN &rlsn, uint64_t start_time, std::function<void(void *)> callback, void *context = nullptr);
   void dequeue_committed_xcts(uint64_t up_to, uint64_t end_time);
+  void dequeue_committed_xcts_multithreaded(uint32_t tid);
+  void set_dequeue_threads_status(bool wake);
   void set_upto_lsn(LSNType type, uint64_t lsn);
   int open_segment_for_read(segment_id * sid);
 
@@ -104,6 +110,14 @@ struct sm_log_alloc_mgr {
 
   bool _write_daemon_should_wake;
   bool _write_daemon_should_stop;
+
+  std::thread *_dequeue_threads;
+  std::map<uint32_t, bool> _dequeue_threads_status;
+  std::mutex _wait_dequeue_mutex;
+  std::mutex _wake_write_daemon_mutex;
+  std::condition_variable _dequeue_cv;
+  std::condition_variable _wake_write_daemon_cv;
+  std::atomic<uint32_t> _dequeue_finished_counter;
 
   // tzwang: use one _tls_lsn_offset per worker thread to record its
   // most-recently committed/aborted transaction's log lsn offset. This array

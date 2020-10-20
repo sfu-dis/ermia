@@ -417,7 +417,7 @@ PROMISE(int) basic_table<P>::scan_oid(H helper, Str firstkey, bool emit_firstkey
     switch (state) {
     case mystack_type::scan_emit: { // surpress cross init warning about v
       ++scancount;
-      ermia::OID oid = entry.value();
+      value_type oid = entry.value();
       if (!scanner.visit_oid(ka, oid))
         goto done;
       stack[stackpos].ki_ = helper.next(stack[stackpos].ki_);

@@ -74,6 +74,10 @@ void sm_log::enqueue_committed_xct(uint32_t worker_id, rLSN &rlsn, uint64_t star
   get_impl(this)->_lm.enqueue_committed_xct(worker_id, rlsn, start_time, callback, context);
 }
 
+void sm_log::free_tls_lsn_slot() {
+  get_impl(this)->_lm.free_tls_lsn_slot();
+}
+
 void sm_log::set_upto_lsn(LSNType type, uint64_t lsn) {
   return get_impl(this)->_lm.set_upto_lsn(type, lsn);
 }

@@ -32,6 +32,43 @@ void Initialize();
 
 // == total number of threads had so far - never decreases
 extern std::atomic<uint32_t> next_thread_id;
+extern std::atomic<uint32_t> next_slot_idx;
+const uint32_t INVALID_SLOT_IDX = 0xFFFFFFFF;
+const uint64_t OCCUPIED_SLOT = 0xFFFFFFFFFFFFFFFF;
+
+/*
+ * get_tls_lsn_offset_idx will perform the following actions:
+ * 1. if is_cleanup == true, which means the thread is exiting, we just have to clean it up,
+ *    no need to allocate slot if the slot is unused.
+ * 2. if idx is INVALID, try to get a free entry from the array
+ * 3. if idx is valid, just return the idx
+ *
+ */
+inline uint32_t get_tls_lsn_offset_idx(uint64_t *_tls_lsn_offset, bool is_cleanup = false) {
+    thread_local uint32_t idx CACHE_ALIGNED = INVALID_SLOT_IDX;
+    uint64_t FREE_SLOT = 0;
+    if (is_cleanup) {
+        return idx;
+    }
+    if (idx == INVALID_SLOT_IDX) {
+        while(true) {
+            idx = next_slot_idx.fetch_add(1) % config::max_threads;
+            if (_tls_lsn_offset[idx]) {
+                continue;
+            }
+            bool ok = __atomic_compare_exchange_n(&_tls_lsn_offset[idx], &FREE_SLOT, OCCUPIED_SLOT, false,
+                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+            if (ok) {
+                break;
+            }
+            FREE_SLOT = 0;
+            LOG(INFO) << "thread waiting for a free slot: " << std::this_thread::get_id();
+        }
+        LOG(INFO) << "allocate slot " << idx << " for thread " << std::this_thread::get_id();
+    }
+    return idx;
+}
+
 
 inline uint32_t MyId() {
   thread_local uint32_t thread_id CACHE_ALIGNED;

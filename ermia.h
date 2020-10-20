@@ -95,7 +95,13 @@ private:
 
     inline bool Invoke(const ConcurrentMasstree::string_type &k,
                        const varstr &v) {
-      return upcall->Invoke(k.data(), k.length(), v);
+      // We've reached the limit, stop the Invoke now
+      if (upcall->limit == 0) {
+        return false;
+      }
+      auto ret =  upcall->Invoke(k.data(), k.length(), v);
+      upcall->limit = upcall->limit - 1;
+      return ret;
     }
     inline bool Invoke(const ConcurrentMasstree::string_type &k, OID oid) {
       return dia_upcall->Invoke(k.data(), k.length(), oid);

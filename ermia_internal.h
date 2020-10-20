@@ -1,6 +1,7 @@
 #pragma once
 #include <map>
 #include "dbcore/sm-common.h"
+#include "masstree/masstree_btree_noxid.h"
 
 namespace ermia {
 
@@ -23,6 +24,7 @@ public:
 
   class ScanCallback {
   public:
+    size_t limit = -1;
     virtual ~ScanCallback() {}
     virtual bool Invoke(const char *keyp, size_t keylen,
                         const varstr &value) = 0;
