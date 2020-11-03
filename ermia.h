@@ -13,7 +13,7 @@ class Table;
 class Engine {
 private:
   void LogIndexCreation(bool primary, FID table_fid, FID index_fid, const std::string &index_name);
-  void CreateIndex(const char *table_name, const std::string &index_name, bool is_primary);
+  void CreateIndex(const char *table_name, const std::string &index_name, bool is_primary, bool is_unique = true);
 
 public:
   Engine();
@@ -32,8 +32,8 @@ public:
   }
 
   // Create a secondary masstree index
-  inline void CreateMasstreeSecondaryIndex(const char *table_name, const std::string &index_name) {
-    CreateIndex(table_name, index_name, false);
+  inline void CreateMasstreeSecondaryIndex(const char *table_name, const std::string &index_name, bool is_unique = true) {
+    CreateIndex(table_name, index_name, false, is_unique);
   }
 
   inline transaction *NewTransaction(uint64_t txn_flags, str_arena &arena, transaction *buf) {
@@ -148,6 +148,9 @@ public:
 
   virtual PROMISE(void) GetRecord(transaction *t, rc_t &rc, const varstr &key, varstr &value,
                          OID *out_oid = nullptr) override;
+  virtual PROMISE(void) GetRecordMulti(transaction *t, rc_t &rc, const varstr &key, std::vector<varstr&> &value,
+                           std::vector<OID> *oids = nullptr);
+
 
   PROMISE(rc_t) UpdateRecord(transaction *t, const varstr &key, varstr &value) override;
   PROMISE(rc_t) InsertRecord(transaction *t, const varstr &key, varstr &value, OID *out_oid = nullptr) override;
@@ -173,5 +176,6 @@ public:
 
 private:
   PROMISE(bool) InsertIfAbsent(transaction *t, const varstr &key, OID oid) override;
+  PROMISE(bool) InsertToDir(transaction *t, const varstr &key, OID oid);
 };
 } // namespace ermia

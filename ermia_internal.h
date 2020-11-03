@@ -2,6 +2,7 @@
 #include <map>
 #include "dbcore/sm-common.h"
 #include "masstree/masstree_btree_noxid.h"
+#define OID_DIR_SIZE 4096
 
 namespace ermia {
 
@@ -12,6 +13,7 @@ class OrderedIndex {
 protected:
   TableDescriptor *table_descriptor;
   bool is_primary;
+  bool is_unique = false;
   FID self_fid;
 
 public:
@@ -19,8 +21,11 @@ public:
   virtual ~OrderedIndex() {}
   inline TableDescriptor *GetTableDescriptor() { return table_descriptor; }
   inline bool IsPrimary() { return is_primary; }
+  inline bool IsUnique() { return is_unique; }
   inline FID GetIndexFid() { return self_fid; }
   virtual void *GetTable() = 0;
+  // TODO(jianqiuz): Support unique secondary index.
+  inline void SetUnique(bool uk) {is_unique = uk;}
 
   class ScanCallback {
   public:
@@ -51,6 +56,7 @@ public:
                                      OID *out_oid = nullptr) = 0;
 
   // Map a key to an existing OID. Could be used for primary or secondary index.
+  // TODO(jianqiuz): Insert a key to an existing OID, this key can contain multiple OIDs
   virtual PROMISE(bool) InsertOID(transaction *t, const varstr &key, OID oid) = 0;
 
   // Search [start_key, *end_key) if end_key is not null, otherwise

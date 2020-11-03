@@ -78,14 +78,16 @@ void Engine::LogIndexCreation(bool primary, FID table_fid, FID index_fid, const 
   }
 }
 
-void Engine::CreateIndex(const char *table_name, const std::string &index_name, bool is_primary) {
+void Engine::CreateIndex(const char *table_name, const std::string &index_name, bool is_primary, bool is_unique) {
   auto *td = TableDescriptor::Get(table_name);
   ALWAYS_ASSERT(td);
   auto *index = new ConcurrentMasstreeIndex(table_name, is_primary);
   if (is_primary) {
     td->SetPrimaryIndex(index, index_name);
+    index->SetUnique(true);
   } else {
     td->AddSecondaryIndex(index, index_name);
+    index->SetUnique(is_unique);
   }
   FID index_fid = index->GetIndexFid();
   LogIndexCreation(is_primary, td->GetTupleFid(), index_fid, index_name);
@@ -150,6 +152,11 @@ std::map<std::string, uint64_t> ConcurrentMasstreeIndex::Clear() {
   masstree_.tree_walk(w);
   masstree_.clear();
   return std::map<std::string, uint64_t>();
+}
+
+PROMISE(void) ConcurrentMasstreeIndex::GetRecordMulti(transaction *t, rc_t &rc, const varstr &key, 
+        std::vector<varstr&> &value, std::vector<OID> *out_oid) {
+    RETURN;
 }
 
 PROMISE(void) ConcurrentMasstreeIndex::GetRecord(transaction *t, rc_t &rc, const varstr &key,
@@ -240,7 +247,12 @@ PROMISE(bool) ConcurrentMasstreeIndex::InsertIfAbsent(transaction *t, const vars
 ////////////////// Index interfaces /////////////////
 
 PROMISE(bool) ConcurrentMasstreeIndex::InsertOID(transaction *t, const varstr &key, OID oid) {
-  bool inserted = AWAIT InsertIfAbsent(t, key, oid);
+  bool inserted = false;
+  if (this->is_unique) {
+    inserted = AWAIT InsertIfAbsent(t, key, oid);
+  } else {
+    inserted = AWAIT InsertToDir(t, key, oid);
+  }
   if (inserted) {
     t->LogIndexInsert(this, oid, &key);
     if (config::enable_chkpt) {
@@ -249,6 +261,75 @@ PROMISE(bool) ConcurrentMasstreeIndex::InsertOID(transaction *t, const varstr &k
     }
   }
   RETURN inserted;
+}
+
+static inline OID *find_empty_dir_entry(transaction *t, OID *chunk, ermia::TableDescriptor *td);
+
+// TODO(jianqiuz): Create a new entry in the OID Object and insert the oid
+// TODO(jianqiuz): Uniqueness check for OID dir. We shouldn't have two same OID entry in one OID Dir.
+PROMISE(bool) ConcurrentMasstreeIndex::InsertToDir(transaction *t, const varstr &key, OID oid) {
+  ALWAYS_ASSERT(!this->IsUnique());
+  OID dir_oid = INVALID_OID;
+  auto e = MM::epoch_enter();
+  auto found = AWAIT masstree_.search(key, dir_oid, e);
+  auto td = this->GetTableDescriptor();
+  ALWAYS_ASSERT(td);
+  /* Empty entry, create and insert the first record */
+  if (!found) {
+      uint32_t size = sizeof(OID) * OID_DIR_SIZE;
+      auto chunk = reinterpret_cast<char *>(MM::allocate(size));
+      ermia::varstr dir_obj(chunk, size);
+
+      auto dirp = reinterpret_cast<OID *>(dir_obj.data());
+      dirp[0] = 1;
+      dirp[1] = oid;
+      t->Insert(td, &dir_obj);
+      MM::epoch_exit(0, e);
+      return true;
+  }
+  auto dirp = oidmgr->oid_get(td->GetTupleFid(), dir_oid);
+  ALWAYS_ASSERT(dirp._ptr);
+  auto slot = find_empty_dir_entry(t, dirp, td);
+  // TODO(jianqiuz): Can we do in place update here?
+  auto p = reinterpret_cast<OID *>(dirp._ptr);
+  p[0] += 1;
+  *slot = oid;
+  MM::epoch_exit(0, e);
+  return true;
+}
+
+// Should only be called via InsertToDir, already entered epoch
+static inline OID *find_empty_dir_entry(transaction *t, OID *chunk, ermia::TableDescriptor *td) {
+    if(chunk[0] == INVALID_OID) {
+        return chunk;
+    }
+    OID *result = nullptr;
+    const uint32_t rec_count = reinterpret_cast<uint32_t>(chunk[0]);
+    auto depth = (rec_count + 1) / (OID_DIR_SIZE - 1);
+    auto pos = (rec_count + 1) % (OID_DIR_SIZE - 1);
+    OID new_dir_oid = INVALID_OID;
+    if (!pos) {
+      /* Allocate a new oid dir list */
+      uint32_t size = sizeof(OID) * OID_DIR_SIZE;
+      auto mem = reinterpret_cast<char *>(MM::allocate(size));
+      ermia::varstr dir_obj(mem, size);
+      auto dirp = reinterpret_cast<OID *>(dir_obj.data());
+      result = dirp;
+      new_dir_oid = t->Insert(td, &dir_obj);
+      depth -= 1;
+   }
+   auto p = chunk;
+   while(depth > 0) {
+       auto sub_obj = oidmgr->oid_get(td->GetTupleFid(), p[OID_DIR_SIZE - 1]);
+       p = reinterpret_cast<OID *>(sub_obj._ptr);
+       depth -= 1;
+   }
+   if (new_dir_oid != INVALID_OID) {
+       /* Update the last entry in the previous dir list */
+       p[OID_DIR_SIZE - 1] = new_dir_oid;
+       return result;
+   }
+   return p + pos;
 }
 
 PROMISE(rc_t) ConcurrentMasstreeIndex::InsertRecord(transaction *t, const varstr &key, varstr &value, OID *out_oid) {
