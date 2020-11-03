@@ -14,15 +14,6 @@ extern uint g_initial_table_size;
 extern int g_zipfian_rng;
 extern double g_zipfian_theta;
 
-enum class ReadTransactionType {
-  Sequential,
-  AMACMultiGet,
-  SimpleCoroMultiGet,
-  AdvCoroMultiGet,
-  SimpleCoro,
-  AdvCoro
-};
-
 // TODO(tzwang); support other value length specified by user
 #define YCSB_KEY_FIELDS(x, y) x(uint64_t, y_key)
 #define YCSB_VALUE_FIELDS(x, y) x(inline_str_fixed<8>, y_value)

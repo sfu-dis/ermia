@@ -7,6 +7,8 @@
 
 namespace ermia {
 
+class OrderedIndex;
+
 /* The base functor class that implements common methods needed
  * by most recovery methods. The specific recovery method can
  * inherit this guy and implement its own way of recovery, e.g.,

@@ -78,29 +78,6 @@ struct oid_array {
   fat_ptr _entries[];
 };
 
-struct OIDAMACState {
-  OID oid;
-  int stage;
-  dbtuple *tuple;
-  bool done;
-
-  fat_ptr ptr;
-  Object *cur_obj;
-  Object *prev_obj;
-  fat_ptr tentative_next;
-
-  OIDAMACState(OID oid)
-  : oid(oid)
-  , stage(0)
-  , tuple(nullptr)
-  , done(false)
-  , ptr(NULL_PTR)
-  , cur_obj(nullptr)
-  , prev_obj(nullptr)
-  , tentative_next(NULL_PTR)
-  {}
-};
-
 struct sm_oid_mgr {
   using log_tx_scan = sm_log_scan_mgr::record_scan;
 
@@ -212,10 +189,6 @@ struct sm_oid_mgr {
                               Object *prev_obj,
                               Object *&cur_obj,
                               TXN::xid_context *visitor_xc);
-
-  void oid_get_version_amac(oid_array *oa,
-                            std::vector<OIDAMACState> &requests,
-                            TXN::xid_context *visitor_xc);
 
   /* Return the latest visible version, for backups only. Check first the pedest
    * array and install new Objects on the tuple array if needed.

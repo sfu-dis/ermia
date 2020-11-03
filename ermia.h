@@ -1,6 +1,5 @@
 #pragma once
 
-#include "../dbcore/sm-dia.h"
 #include "../dbcore/sm-log-recover-impl.h"
 #include "txn.h"
 #include "../benchmarks/record/encoder.h"
@@ -89,8 +88,6 @@ private:
   struct SearchRangeCallback {
     SearchRangeCallback(OrderedIndex::ScanCallback &upcall)
         : upcall(&upcall), return_code(rc_t{RC_FALSE}) {}
-    SearchRangeCallback(OrderedIndex::DiaScanCallback &dia_upcall)
-        : dia_upcall(&dia_upcall), return_code(rc_t{RC_FALSE}) {}
     ~SearchRangeCallback() {}
 
     inline bool Invoke(const ConcurrentMasstree::string_type &k,
@@ -103,12 +100,8 @@ private:
       upcall->limit = upcall->limit - 1;
       return ret;
     }
-    inline bool Invoke(const ConcurrentMasstree::string_type &k, OID oid) {
-      return dia_upcall->Invoke(k.data(), k.length(), oid);
-    }
 
     OrderedIndex::ScanCallback *upcall;
-    OrderedIndex::DiaScanCallback *dia_upcall;
     rc_t return_code;
   };
 
@@ -125,8 +118,6 @@ private:
                         dbtuple *v,
                         const typename ConcurrentMasstree::node_opaque_t *n,
                         uint64_t version);
-    virtual bool invoke(const typename ConcurrentMasstree::string_type &k,
-                        OID oid, uint64_t version);
 
   private:
     transaction *const t;
@@ -158,24 +149,6 @@ public:
   virtual PROMISE(void) GetRecord(transaction *t, rc_t &rc, const varstr &key, varstr &value,
                          OID *out_oid = nullptr) override;
 
-  // A multi-get operation using AMAC
-  void amac_MultiGet(transaction *t,
-                     std::vector<ConcurrentMasstree::AMACState> &requests,
-                     std::vector<varstr *> &values);
-
-  // A multi-get operation using coroutines
-  void simple_coro_MultiGet(transaction *t, std::vector<varstr *> &keys,
-                            std::vector<varstr *> &values,
-                            std::vector<std::experimental::coroutine_handle<
-                            ermia::dia::generator<bool>::promise_type>> &handles);
-
-#ifdef ADV_COROUTINE
-  void adv_coro_MultiGet(transaction *t, std::vector<varstr *> &keys, std::vector<varstr *> &values,
-                         std::vector<ermia::dia::task<bool>> &index_probe_tasks,
-                         std::vector<ermia::dia::task<ermia::dbtuple*>> &value_fetch_tasks,
-                         std::vector<ermia::dia::coro_task_private::coro_stack> &coro_stacks);
-#endif
-
   PROMISE(rc_t) UpdateRecord(transaction *t, const varstr &key, varstr &value) override;
   PROMISE(rc_t) InsertRecord(transaction *t, const varstr &key, varstr &value, OID *out_oid = nullptr) override;
   PROMISE(rc_t) RemoveRecord(transaction *t, const varstr &key) override;
@@ -200,11 +173,5 @@ public:
 
 private:
   PROMISE(bool) InsertIfAbsent(transaction *t, const varstr &key, OID oid) override;
-
-  PROMISE(void) ScanOID(transaction *t, const varstr &start_key, const varstr *end_key,
-                        rc_t &rc, OID *dia_callback) override;
-  PROMISE(void) ReverseScanOID(transaction *t, const varstr &start_key,
-                               const varstr *end_key, rc_t &rc,
-                               OID *dia_callback) override;
 };
 } // namespace ermia

@@ -1,7 +1,6 @@
 #include "dbcore/rcu.h"
 #include "dbcore/sm-chkpt.h"
 #include "dbcore/sm-cmd-log.h"
-#include "dbcore/sm-dia.h"
 #include "dbcore/sm-rep.h"
 
 #include "ermia.h"
@@ -153,70 +152,6 @@ std::map<std::string, uint64_t> ConcurrentMasstreeIndex::Clear() {
   return std::map<std::string, uint64_t>();
 }
 
-void ConcurrentMasstreeIndex::amac_MultiGet(
-    transaction *t, std::vector<ConcurrentMasstree::AMACState> &requests,
-    std::vector<varstr *> &values) {
-#ifndef ADV_COROUTINE
-  ConcurrentMasstree::versioned_node_t sinfo;
-  if (!t) {
-    auto e = MM::epoch_enter();
-    masstree_.search_amac(requests, e);
-    MM::epoch_exit(0, e);
-  } else {
-    t->ensure_active();
-    masstree_.search_amac(requests, t->xc->begin_epoch);
-    if (config::is_backup_srv()) {
-      for (uint32_t i = 0; i < requests.size(); ++i) {
-        auto &r = requests[i];
-        if (r.out_oid != INVALID_OID) {
-          // Key-OID mapping exists, now try to get the actual tuple to be sure
-          auto *tuple = oidmgr->BackupGetVersion(
-              table_descriptor->GetTupleArray(),
-              table_descriptor->GetPersistentAddressArray(), r.out_oid, t->xc);
-          if (tuple) {
-            t->DoTupleRead(tuple, values[i]);
-          } else if (config::phantom_prot) {
-            DoNodeRead(t, sinfo.first, sinfo.second);
-          }
-        }
-      }
-    } else if (!config::index_probe_only) {
-      if (config::amac_version_chain) {
-        // AMAC style version chain traversal
-        thread_local std::vector<OIDAMACState> version_requests;
-        version_requests.clear();
-        for (auto &s : requests) {
-          version_requests.emplace_back(s.out_oid);
-        }
-        oidmgr->oid_get_version_amac(table_descriptor->GetTupleArray(),
-                                     version_requests, t->xc);
-        uint32_t i = 0;
-        for (auto &vr : version_requests) {
-          if (vr.tuple) {
-            t->DoTupleRead(vr.tuple, values[i++]);
-          } else if (config::phantom_prot) {
-            DoNodeRead(t, sinfo.first, sinfo.second);
-          }
-        }
-      } else {
-        for (uint32_t i = 0; i < requests.size(); ++i) {
-          auto &r = requests[i];
-          if (r.out_oid != INVALID_OID) {
-            auto *tuple = oidmgr->oid_get_version(table_descriptor->GetTupleArray(),
-                                                  r.out_oid, t->xc);
-            if (tuple) {
-              t->DoTupleRead(tuple, values[i]);
-            } else if (config::phantom_prot) {
-              DoNodeRead(t, sinfo.first, sinfo.second);
-            }
-          }
-        }
-      }
-    }
-  }
-#endif
-}
-
 PROMISE(void) ConcurrentMasstreeIndex::GetRecord(transaction *t, rc_t &rc, const varstr &key,
                                         varstr &value, OID *out_oid) {
   OID oid = INVALID_OID;
@@ -262,114 +197,6 @@ PROMISE(void) ConcurrentMasstreeIndex::GetRecord(transaction *t, rc_t &rc, const
   }
 }
 
-void ConcurrentMasstreeIndex::simple_coro_MultiGet(
-    transaction *t, std::vector<varstr *> &keys, std::vector<varstr *> &values,
-    std::vector<std::experimental::coroutine_handle<ermia::dia::generator<bool>::promise_type>> &handles) {
-  auto e = MM::epoch_enter();
-  ConcurrentMasstree::threadinfo ti(e);
-  ConcurrentMasstree::versioned_node_t sinfo;
-
-  OID oid = INVALID_OID;
-  for (int i = 0; i < keys.size(); ++i) {
-    handles[i] = masstree_.search_coro(*keys[i], oid, ti, &sinfo).get_handle();
-  }
-
-  int finished = 0;
-  while (finished < handles.size()) {
-    for (auto &h : handles) {
-      if (h) {
-        if (h.done()) {
-          ++finished;
-          h.destroy();
-          h = nullptr;
-        } else {
-          h.resume();
-        }
-      }
-    }
-  }
-  MM::epoch_exit(0, e);
-}
-
-#ifdef ADV_COROUTINE
-void ConcurrentMasstreeIndex::adv_coro_MultiGet(
-    transaction *t, std::vector<varstr *> &keys, std::vector<varstr *> &values,
-    std::vector<ermia::dia::task<bool>> &index_probe_tasks,
-    std::vector<ermia::dia::task<ermia::dbtuple*>> &value_fetch_tasks,
-    std::vector<ermia::dia::coro_task_private::coro_stack> &coro_stacks) {
-  ermia::epoch_num e = t ? t->xc->begin_epoch : MM::epoch_enter();
-  ConcurrentMasstree::versioned_node_t sinfo;
-  thread_local std::vector<OID> oids;
-  oids.clear();
-
-  for (int i = 0; i < keys.size(); ++i) {
-    oids.emplace_back(INVALID_OID);
-    index_probe_tasks[i] = masstree_.search(*keys[i], oids[i], e, &sinfo);
-    index_probe_tasks[i].set_call_stack(&coro_stacks[i]);
-  }
-
-  int finished = 0;
-  while (finished < keys.size()) {
-    for (auto &t : index_probe_tasks) {
-      if (t.valid()) {
-        if (t.done()) {
-          ++finished;
-          t = ermia::dia::task<bool>(nullptr);
-        } else {
-          t.resume();
-        }
-      }
-    }
-  }
-
-  if (!t) {
-    MM::epoch_exit(0, e);
-  } else {
-    t->ensure_active();
-    if (config::is_backup_srv()) {
-      // TODO
-      assert(false && "Backup not supported in coroutine execution");
-    } else {
-      int finished = 0;
-
-      for (uint32_t i = 0; i < keys.size(); ++i) {
-        if (oids[i] != INVALID_OID) {
-          value_fetch_tasks[i] = oidmgr->oid_get_version(table_descriptor->GetTupleArray(), oids[i], t->xc);
-          value_fetch_tasks[i].set_call_stack(&coro_stacks[i]);
-        } else {
-          ++finished;
-        }
-      }
-
-      while (finished < keys.size()) {
-        for (auto &t : value_fetch_tasks) {
-          if (t.valid()) {
-            if (t.done()) {
-              ++finished;
-            } else {
-              t.resume();
-            }
-          }
-        }
-      }
-
-      for (uint32_t i = 0; i < keys.size(); ++i) {
-        if (oids[i] != INVALID_OID) {
-          auto *tuple = value_fetch_tasks[i].get_return_value();
-          if (tuple) {
-            t->DoTupleRead(tuple, values[i]);
-          } else if (config::phantom_prot) {
-            DoNodeRead(t, sinfo.first, sinfo.second);
-          }
-
-          value_fetch_tasks[i].destroy();
-        }
-      }
-    }
-  }
-}
-#endif  // ADV_COROUTINE
-
 void ConcurrentMasstreeIndex::PurgeTreeWalker::on_node_begin(
     const typename ConcurrentMasstree::node_opaque_t *n) {
   ASSERT(spec_values.empty());
@@ -408,53 +235,6 @@ PROMISE(bool) ConcurrentMasstreeIndex::InsertIfAbsent(transaction *t, const vars
     }
   }
   RETURN true;
-}
-
-PROMISE(void) ConcurrentMasstreeIndex::ScanOID(transaction *t, const varstr &start_key,
-                                      const varstr *end_key, rc_t &rc,
-                                      OID *dia_callback) {
-  SearchRangeCallback c(*(DiaScanCallback *)dia_callback);
-  t->ensure_active();
-  if (end_key) {
-    VERBOSE(std::cerr << "txn_btree(0x" << util::hexify(intptr_t(this))
-                      << ")::search_range_call [" << util::hexify(start_key)
-                      << ", " << util::hexify(*end_key) << ")" << std::endl);
-  } else {
-    VERBOSE(std::cerr << "txn_btree(0x" << util::hexify(intptr_t(this))
-                      << ")::search_range_call [" << util::hexify(start_key)
-                      << ", +inf)" << std::endl);
-  }
-
-  int scancount = 0;
-  if (!unlikely(end_key && *end_key <= start_key)) {
-    XctSearchRangeCallback cb(t, &c);
-    varstr uppervk;
-    if (end_key) {
-      uppervk = *end_key;
-    }
-    scancount = AWAIT masstree_.search_range_oid(
-        start_key, end_key ? &uppervk : nullptr, cb, t->xc);
-  }
-  volatile_write(rc._val, scancount ? RC_TRUE : RC_FALSE);
-}
-
-PROMISE(void) ConcurrentMasstreeIndex::ReverseScanOID(transaction *t,
-                                             const varstr &start_key,
-                                             const varstr *end_key, rc_t &rc,
-                                             OID *dia_callback) {
-  SearchRangeCallback c(*(DiaScanCallback *)dia_callback);
-  t->ensure_active();
-  int scancount = 0;
-  if (!unlikely(end_key && start_key <= *end_key)) {
-    XctSearchRangeCallback cb(t, &c);
-    varstr lowervk;
-    if (end_key) {
-      lowervk = *end_key;
-    }
-    scancount = AWAIT masstree_.rsearch_range_oid(
-        start_key, end_key ? &lowervk : nullptr, cb, t->xc);
-  }
-  volatile_write(rc._val, scancount ? RC_TRUE : RC_FALSE);
 }
 
 ////////////////// Index interfaces /////////////////
@@ -603,17 +383,6 @@ bool ConcurrentMasstreeIndex::XctSearchRangeCallback::invoke(
     return false; // don't continue the read if the tx should abort
   }
   return true;
-}
-
-bool ConcurrentMasstreeIndex::XctSearchRangeCallback::invoke(
-    const typename ConcurrentMasstree::string_type &k, OID oid,
-    uint64_t version) {
-  t->ensure_active();
-  VERBOSE(std::cerr << "search range k: " << util::hexify(k) << " from <node=0x"
-                    << util::hexify(n) << ", version=" << version << ">"
-                    << std::endl
-                    << " oid: " << oid << std::endl);
-  return caller_callback->Invoke(k, oid);
 }
 
 ////////////////// End of index interfaces //////////

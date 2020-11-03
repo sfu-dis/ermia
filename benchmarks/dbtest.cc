@@ -7,7 +7,6 @@
 #include <gflags/gflags.h>
 
 #include "bench.h"
-#include "../dbcore/sm-dia.h"
 #include "../dbcore/rcu.h"
 #include "../dbcore/sm-log-recover-impl.h"
 #include "../dbcore/sm-rep.h"
@@ -22,20 +21,10 @@ DEFINE_uint64(arena_size_mb, 4, "Size of transaction arena (private workspace) i
 DEFINE_bool(tls_alloc, true, "Whether to use the TLS allocator defined in sm-alloc.h");
 DEFINE_bool(htt, true, "Whether the HW has hyper-threading enabled."
   "Ignored if auto-detection of physical cores succeeded.");
-DEFINE_bool(physical_workers_only, true, "Whether to only use one thread per physical core as transaction workers. Ignored under DIA.");
-DEFINE_bool(amac_version_chain, false, "Whether to use AMAC for traversing version chain; applicable only for multi-get.");
-DEFINE_bool(coro_tx, false, "Whether to turn each transaction into a coroutine");
-DEFINE_uint64(coro_batch_size, 5, "Number of in-flight coroutines");
+DEFINE_bool(physical_workers_only, true, "Whether to only use one thread per physical core as transaction workers.");
 DEFINE_bool(verbose, true, "Verbose mode.");
 DEFINE_string(benchmark, "tpcc", "Benchmark name: tpcc, tpce, or ycsb");
 DEFINE_string(benchmark_options, "", "Benchmark-specific opetions.");
-DEFINE_bool(index_probe_only, false, "Whether the read is only probing into index");
-DEFINE_bool(dia, false, "Whether to use decoupled index access (DIA)");
-DEFINE_string(dia_request_handler, "serial", "DIA request handler: serial, coroutine or amac");
-DEFINE_bool(dia_request_coalesce, false, "Whether to coalesce requests in DIA");
-DEFINE_uint64(dia_batch_size, 1, "Batch size of requests processed in DIA handler.");
-DEFINE_uint64(dia_logical_index_threads, 1, "Number of logical index threads to run transactions in DIA.");
-DEFINE_uint64(dia_physical_index_threads, 0, "Number of physical index threads to run transactions in DIA.");
 DEFINE_uint64(threads, 1, "Number of worker threads to run transactions.");
 DEFINE_uint64(node_memory_gb, 12, "GBs of memory to allocate per node.");
 DEFINE_bool(numa_spread, false, "Whether to pin threads in spread mode (compact if false)");
@@ -182,25 +171,12 @@ int main(int argc, char **argv) {
   ermia::config::htt_is_on = FLAGS_htt;
   ermia::config::enable_perf = FLAGS_enable_perf;
   ermia::config::perf_record_event = FLAGS_perf_record_event;
-  if (FLAGS_dia){
-    if (!FLAGS_physical_workers_only){
-      LOG(INFO) << "DIA is on, ignoring the physical-workers-only option";
-      ermia::config::physical_workers_only = true;
-    }
-    ermia::config::dia_req_handler = FLAGS_dia_request_handler;
-    ermia::config::dia_req_coalesce = FLAGS_dia_request_coalesce;
-    ermia::config::dia_batch_size = FLAGS_dia_batch_size;
-    ermia::config::dia_logical_index_threads = FLAGS_dia_logical_index_threads;
-    ermia::config::dia_physical_index_threads = FLAGS_dia_physical_index_threads;
-    ermia::config::threads = FLAGS_threads + FLAGS_dia_physical_index_threads;
+  ermia::config::physical_workers_only = FLAGS_physical_workers_only;
+  if (ermia::config::physical_workers_only) {
+    ermia::config::threads = FLAGS_threads;
   } else {
-    ermia::config::physical_workers_only = FLAGS_physical_workers_only;
-    if (ermia::config::physical_workers_only)
-      ermia::config::threads = FLAGS_threads;
-    else
-      ermia::config::threads = (FLAGS_threads + 1) / 2;
+    ermia::config::threads = (FLAGS_threads + 1) / 2;
   }
-  ermia::config::index_probe_only = FLAGS_index_probe_only;
   ermia::config::verbose = FLAGS_verbose;
   ermia::config::node_memory_gb = FLAGS_node_memory_gb;
   ermia::config::numa_spread = FLAGS_numa_spread;
@@ -211,8 +187,6 @@ int main(int argc, char **argv) {
   ermia::config::phantom_prot = FLAGS_phantom_prot;
   ermia::config::recover_functor = new ermia::parallel_oid_replay(FLAGS_threads);
   ermia::config::log_ship_by_rdma = FLAGS_log_ship_by_rdma;
-
-  ermia::config::amac_version_chain = FLAGS_amac_version_chain;
 
 #if defined(SSI) || defined(SSN)
   ermia::config::enable_safesnap = FLAGS_safesnap;
@@ -236,9 +210,6 @@ int main(int argc, char **argv) {
   ermia::config::command_log_buffer_mb = FLAGS_command_log_buffer_mb;
 
   ermia::config::arena_size_mb = FLAGS_arena_size_mb;
-
-  ermia::config::coro_tx = FLAGS_coro_tx;
-  ermia::config::coro_batch_size = FLAGS_coro_batch_size;
 
   // Backup specific arguments
   if (ermia::config::is_backup_srv()) {
@@ -377,21 +348,11 @@ int main(int argc, char **argv) {
   std::cerr << "  phantom-protection: " << ermia::config::phantom_prot << std::endl;
 
   std::cerr << "Settings and properties" << std::endl;
-  std::cerr << "  amac-version-chain: " << FLAGS_amac_version_chain << std::endl;
   std::cerr << "  arena-size-mb     : " << FLAGS_arena_size_mb << std::endl;
   std::cerr << "  benchmark         : " << FLAGS_benchmark << std::endl;
   std::cerr << "  command-log       : " << ermia::config::command_log << std::endl;
   std::cerr << "  command-logbuf    : " << ermia::config::command_log_buffer_mb << "MB" << std::endl;
-  std::cerr << "  coro-tx           : " << FLAGS_coro_tx << std::endl;
-  std::cerr << "  coro-batch-size   : " << FLAGS_coro_batch_size << std::endl;
-  std::cerr << "  dia               : " << FLAGS_dia << std::endl;
-  std::cerr << "  dia-req-handler   : " << FLAGS_dia_request_handler << std::endl;
-  std::cerr << "  dia-req-coalsece  : " << FLAGS_dia_request_coalesce << std::endl;
-  std::cerr << "  dia-batch-size    : " << FLAGS_dia_batch_size << std::endl;
-  std::cerr << "  dia-logical-index-threads  : " << FLAGS_dia_logical_index_threads << std::endl;
-  std::cerr << "  dia-physical-index-threads : " << FLAGS_dia_physical_index_threads << std::endl;
   std::cerr << "  enable-perf       : " << ermia::config::enable_perf << std::endl;
-  std::cerr << "  index-probe-only  : " << FLAGS_index_probe_only << std::endl;
   std::cerr << "  log-buffer-mb     : " << ermia::config::log_buffer_mb << std::endl;
   std::cerr << "  log-dir           : " << ermia::config::log_dir << std::endl;
   std::cerr << "  log-ship-by-rdma  : " << ermia::config::log_ship_by_rdma << std::endl;
@@ -460,27 +421,11 @@ int main(int argc, char **argv) {
   // Must have everything in config ready by this point
   ermia::config::sanity_check();
   ermia::Engine *db = new ermia::Engine();
-  if (FLAGS_dia) {
-    //ermia::dia::Initialize();
-  }
   void (*test_fn)(ermia::Engine*, int argc, char **argv) = NULL;
   if (FLAGS_benchmark == "ycsb") {
-#ifdef ADV_COROUTINE
-    ALWAYS_ASSERT(ermia::config::coro_tx);
-    test_fn = ycsb_cs_advance_do_test;
-#else
-    if (ermia::config::coro_tx) {
-      test_fn = ycsb_cs_simple_do_test;
-    } else {
-      test_fn = ycsb_do_test;
-    }
-#endif
+    test_fn = ycsb_do_test;
   } else if (FLAGS_benchmark == "tpcc") {
-#ifndef ADV_COROUTINE
     test_fn = tpcc_do_test;
-#else
-    LOG(FATAL) << "Not supported in this build";
-#endif
   } else if (FLAGS_benchmark == "tpce") {
     LOG(FATAL) << "Not supported in this build";
   } else {

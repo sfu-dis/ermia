@@ -9,7 +9,6 @@
 extern uint g_reps_per_tx;
 extern uint g_rmw_additional_reads;
 extern YcsbWorkload ycsb_workload;
-extern ReadTransactionType g_read_txn_type;
 
 class ycsb_sequential_worker : public ycsb_base_worker {
  public:
@@ -26,15 +25,7 @@ class ycsb_sequential_worker : public ycsb_base_worker {
     }
 
     if (ycsb_workload.read_percent()) {
-      if (g_read_txn_type == ReadTransactionType::AMACMultiGet) {
-        w.push_back(workload_desc("Read", double(ycsb_workload.read_percent()) / 100.0, TxnReadAMACMultiGet));
-      } else if (g_read_txn_type == ReadTransactionType::SimpleCoroMultiGet) {
-        w.push_back(workload_desc("Read", double(ycsb_workload.read_percent()) / 100.0, TxnReadSimpleCoroMultiGet));
-      } else if (g_read_txn_type == ReadTransactionType::Sequential) {
-        w.push_back(workload_desc("Read", double(ycsb_workload.read_percent()) / 100.0, TxnRead));
-      } else {
-        LOG(FATAL) << "Wrong read txn type. Supported: sequential, multiget-simple-coro, multiget-adv-coro";
-      }
+      w.push_back(workload_desc("Read", double(ycsb_workload.read_percent()) / 100.0, TxnRead));
     }
 
     if (ycsb_workload.rmw_percent()) {
@@ -45,23 +36,16 @@ class ycsb_sequential_worker : public ycsb_base_worker {
   }
 
   static rc_t TxnRead(bench_worker *w) { return static_cast<ycsb_sequential_worker *>(w)->txn_read(); }
-  static rc_t TxnReadAMACMultiGet(bench_worker *w) { return static_cast<ycsb_sequential_worker *>(w)->txn_read_amac_multiget(); }
-  static rc_t TxnReadSimpleCoroMultiGet(bench_worker *w) { return static_cast<ycsb_sequential_worker *>(w)->txn_read_simple_coro_multiget(); }
   static rc_t TxnRMW(bench_worker *w) { return static_cast<ycsb_sequential_worker *>(w)->txn_rmw(); }
 
   // Read transaction using traditional sequential execution
   rc_t txn_read() {
     ermia::transaction *txn = nullptr;
-    if (ermia::config::index_probe_only) {
-      // Reset the arena as txn will be nullptr and GenerateKey will get space from it
-      arena->reset();
-    } else {
-      txn = db->NewTransaction(ermia::transaction::TXN_FLAG_READ_ONLY, *arena, txn_buf());
-    }
+    txn = db->NewTransaction(ermia::transaction::TXN_FLAG_READ_ONLY, *arena, txn_buf());
 
     for (uint i = 0; i < g_reps_per_tx; ++i) {
       auto &k = GenerateKey(txn);
-      ermia::varstr &v = str((ermia::config::index_probe_only) ? 0 : sizeof(ycsb_kv::value));
+      ermia::varstr &v = str(sizeof(ycsb_kv::value));
       // TODO(tzwang): add read/write_all_fields knobs
       rc_t rc = rc_t{RC_INVALID};
       table_index->GetRecord(txn, rc, k, v);  // Read
@@ -71,74 +55,11 @@ class ycsb_sequential_worker : public ycsb_base_worker {
 #else
       // Under SI this must succeed
       ALWAYS_ASSERT(rc._val == RC_TRUE);
-      ASSERT(ermia::config::index_probe_only || *(char*)v.data() == 'a');
+      ASSERT(*(char*)v.data() == 'a');
 #endif
-      if (!ermia::config::index_probe_only) {
-        memcpy((char*)(&v) + sizeof(ermia::varstr), (char *)v.data(), sizeof(ycsb_kv::value));
-      }
+      memcpy((char*)(&v) + sizeof(ermia::varstr), (char *)v.data(), sizeof(ycsb_kv::value));
     }
-    if (!ermia::config::index_probe_only) {
-      TryCatch(db->Commit(txn));
-    }
-    return {RC_TRUE};
-  }
-
-  // Multi-get using AMAC
-  rc_t txn_read_amac_multiget() {
-    ermia::transaction *txn = nullptr;
-    if (ermia::config::index_probe_only) {
-      arena->reset();
-    } else {
-      values.clear();
-      txn = db->NewTransaction(ermia::transaction::TXN_FLAG_READ_ONLY, *arena, txn_buf());
-      for (uint i = 0; i < g_reps_per_tx; ++i) {
-        if (ermia::config::index_probe_only) {
-          values.push_back(&str(0));
-        } else {
-          values.push_back(&str(sizeof(ycsb_kv::value)));
-        }
-      }
-    }
-
-    // Prepare states
-    for (uint i = 0; i < g_reps_per_tx; ++i) {
-      auto &k = GenerateKey(txn);
-      if (as.size() < g_reps_per_tx)
-        as.emplace_back(&k);
-      else
-        as[i].reset(&k);
-    }
-
-    table_index->amac_MultiGet(txn, as, values);
-
-    if (!ermia::config::index_probe_only) {
-      ermia::varstr &v = str(sizeof(ycsb_kv::value));
-      for (uint i = 0; i < g_reps_per_tx; ++i) {
-        memcpy((char*)(&v) + sizeof(ermia::varstr), (char *)v.data(), sizeof(ycsb_kv::value));
-      }
-      ALWAYS_ASSERT(*(char*)v.data() == 'a');
-    }
-
-    if (!ermia::config::index_probe_only) {
-      TryCatch(db->Commit(txn));
-    }
-    return {RC_TRUE};
-  }
-
-  // Multi-get using simple coroutine
-  rc_t txn_read_simple_coro_multiget() {
-    arena->reset();
-    thread_local std::vector<SimpleCoroHandle> handles(g_reps_per_tx);
-    keys.clear();
-    values.clear();
-  
-    for (uint i = 0; i < g_reps_per_tx; ++i) {
-      auto &k = GenerateKey(nullptr);
-      keys.emplace_back(&k);
-    }
-
-    table_index->simple_coro_MultiGet(nullptr, keys, values, handles);
-
+    TryCatch(db->Commit(txn));
     return {RC_TRUE};
   }
 
@@ -162,10 +83,8 @@ class ycsb_sequential_worker : public ycsb_base_worker {
       ASSERT(*(char*)v.data() == 'a');
 #endif
 
-      if (!ermia::config::index_probe_only) {
-        ALWAYS_ASSERT(v.size() == sizeof(ycsb_kv::value));
-        memcpy((char*)(&v) + sizeof(ermia::varstr), (char *)v.data(), v.size());
-      }
+      ALWAYS_ASSERT(v.size() == sizeof(ycsb_kv::value));
+      memcpy((char*)(&v) + sizeof(ermia::varstr), (char *)v.data(), v.size());
 
       // Re-initialize the value structure to use my own allocated memory -
       // DoTupleRead will change v.p to the object's data area to avoid memory
@@ -190,18 +109,14 @@ class ycsb_sequential_worker : public ycsb_base_worker {
       ALWAYS_ASSERT(rc._val == RC_TRUE);
       ASSERT(*(char*)v.data() == 'a');
 #endif
-      if (!ermia::config::index_probe_only) {
-        ALWAYS_ASSERT(v.size() == sizeof(ycsb_kv::value));
-        memcpy((char*)(&v) + sizeof(ermia::varstr), (char *)v.data(), v.size());
-      }
-
+      ALWAYS_ASSERT(v.size() == sizeof(ycsb_kv::value));
+      memcpy((char*)(&v) + sizeof(ermia::varstr), (char *)v.data(), v.size());
     }
     TryCatch(db->Commit(txn));
     return {RC_TRUE};
   }
 
  private:
-  std::vector<ermia::ConcurrentMasstree::AMACState> as;
   std::vector<ermia::varstr *> keys;
   std::vector<ermia::varstr *> values;
 };

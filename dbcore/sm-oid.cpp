@@ -961,67 +961,6 @@ void sm_oid_mgr::oid_get_version_backup(fat_ptr &ptr,
          tentative_next.asi_type() == fat_ptr::ASI_LOG);
 }
 
-void sm_oid_mgr::oid_get_version_amac(oid_array *oa,
-                                      std::vector<OIDAMACState> &requests,
-                                      TXN::xid_context *visitor_xc) {
-  ALWAYS_ASSERT(!config::is_backup_srv());
-  uint32_t finished = 0;
-  while (finished < requests.size()) {
-    for (auto &s : requests) {
-      if (s.done) {
-        continue;
-      }
-      if (s.stage == 1) {
-        s.tentative_next = s.cur_obj->GetNextVolatile();
-        ASSERT(s.tentative_next.asi_type() == 0);
-
-        bool retry = false;
-        bool visible = TestVisibility(s.cur_obj, visitor_xc, retry);
-        if (retry) {
-          s.stage = 0;
-        } else {
-          if (visible) {
-            s.tuple = s.cur_obj->GetPinnedTuple();
-            s.done = true;
-            ++finished;
-          } else  {
-            s.ptr = s.tentative_next;
-            s.prev_obj = s.cur_obj;
-            if (s.ptr.offset()) {
-              s.cur_obj = (Object *)s.ptr.offset();
-              ::prefetch((const char*)s.cur_obj);
-            } else {
-              s.done = true;
-              s.tuple = nullptr;
-              ++finished;
-            }
-          }
-        }
-      } else if (s.stage == 0) {
-        if (s.oid == INVALID_OID) {
-          s.done = true;
-          ++finished;
-          s.tuple = nullptr;
-        } else {
-          fat_ptr *entry = oa->get(s.oid);
-          s.ptr = volatile_read(*entry);
-          ASSERT(s.ptr.asi_type() == 0);
-          ASSERT(s.ptr.asi_type() == 0);
-          if (s.ptr.offset()) {
-            s.cur_obj = (Object *)s.ptr.offset();
-            ::prefetch((const char*)s.cur_obj);
-            s.stage = 1;  
-          } else {
-            s.done = true;
-            ++finished;
-            s.tuple = nullptr;
-          }
-        }
-      }
-    }
-  }
-}
-
 // For tuple arrays only, i.e., entries are guaranteed to point to Objects.
 PROMISE(dbtuple *) sm_oid_mgr::oid_get_version(oid_array *oa, OID o,
                                      TXN::xid_context *visitor_xc) {

@@ -11,8 +11,6 @@ uint g_initial_table_size = 30000000;
 int g_zipfian_rng = 0;
 double g_zipfian_theta = 0.99;  // zipfian constant, [0, 1), more skewed as it approaches 1.
 
-ReadTransactionType g_read_txn_type = ReadTransactionType::Sequential;
-
 // { insert, read, update, scan, rmw }
 YcsbWorkload YcsbWorkloadA('A', 0, 50U, 100U, 0, 0);  // Workload A - 50% read, 50% update
 YcsbWorkload YcsbWorkloadB('B', 0, 95U, 100U, 0, 0);  // Workload B - 95% read, 5% update
@@ -48,7 +46,6 @@ void ycsb_usertable_loader::load() {
   ermia::OrderedIndex *tbl = open_tables.at("USERTABLE");
   int64_t to_insert = g_initial_table_size / ermia::config::worker_threads;
   uint64_t start_key = loader_id * to_insert;
-  ermia::dia::coro_task_private::memory_pool memory_pool;
   for (uint64_t i = 0; i < to_insert; ++i) {
     ermia::transaction *txn = db->NewTransaction(0, *arena, txn_buf());
     ermia::varstr &k = str(sizeof(uint64_t));
@@ -58,11 +55,7 @@ void ycsb_usertable_loader::load() {
     new (&v) ermia::varstr((char *)&v + sizeof(ermia::varstr), sizeof(ycsb_kv::value));
     *(char*)v.p = 'a';
 
-#ifdef ADV_COROUTINE
-    TryVerifyStrict(sync_wait_coro(tbl->InsertRecord(txn, k, v)));
-#else
     TryVerifyStrict(tbl->InsertRecord(txn, k, v));
-#endif
     TryVerifyStrict(db->Commit(txn));
   }
 
@@ -101,7 +94,6 @@ void ycsb_parse_options(int argc, char **argv) {
         {"initial-table-size", required_argument, 0, 's'},
         {"zipfian", no_argument, &g_zipfian_rng, 1},
         {"zipfian-theta", required_argument, 0, 'z'},
-        {"read-tx-type", required_argument, 0, 't'},
         {0, 0, 0, 0}};
 
     int option_index = 0;
@@ -112,23 +104,6 @@ void ycsb_parse_options(int argc, char **argv) {
         if (long_options[option_index].flag != 0) break;
         abort();
         break;
-
-      case 't':
-        if (std::string(optarg) == "sequential") {
-          g_read_txn_type = ReadTransactionType::Sequential;
-        } else if (std::string(optarg) == "adv-coro") {
-          g_read_txn_type = ReadTransactionType::AdvCoro;
-        } else if (std::string(optarg) == "simple-coro") {
-          g_read_txn_type = ReadTransactionType::SimpleCoro;
-        } else if (std::string(optarg) == "multiget-simple-coro") {
-          g_read_txn_type = ReadTransactionType::SimpleCoroMultiGet;
-        } else if (std::string(optarg) == "multiget-adv-coro") {
-          g_read_txn_type = ReadTransactionType::AdvCoroMultiGet;
-        } else if (std::string(optarg) == "multiget-amac") {
-          g_read_txn_type = ReadTransactionType::AMACMultiGet;
-        } else {
-          LOG(FATAL) << "Wrong read transaction type " << std::string(optarg);
-        }
 
       case 'z':
         g_zipfian_theta = strtod(optarg, NULL);
@@ -188,22 +163,6 @@ void ycsb_parse_options(int argc, char **argv) {
          << "  operations per transaction: " << g_reps_per_tx << std::endl
          << "  additional reads after RMW: " << g_rmw_additional_reads << std::endl
          << "  distribution:               " << (g_zipfian_rng ? "zipfian" : "uniform") << std::endl;
-
-    if (g_read_txn_type == ReadTransactionType::Sequential) {
-      std::cerr << "  read transaction type:      sequential" << std::endl;
-    } else if (g_read_txn_type == ReadTransactionType::AMACMultiGet) {
-      std::cerr << "  read transaction type:      amac multi-get" << std::endl;
-    } else if (g_read_txn_type == ReadTransactionType::SimpleCoroMultiGet) {
-      std::cerr << "  read transaction type:      simple coroutine multi-get" << std::endl;
-    } else if (g_read_txn_type == ReadTransactionType::AdvCoroMultiGet) {
-      std::cerr << "  read transaction type:      advanced coroutine multi-get" << std::endl;
-    } else if (g_read_txn_type == ReadTransactionType::AdvCoro) {
-      std::cerr << "  read transaction type:      advanced coroutine" << std::endl;
-    } else if (g_read_txn_type == ReadTransactionType::SimpleCoro) {
-      std::cerr << "  read transaction type:      simple coroutine" << std::endl;
-    } else {
-      abort();
-    }
 
     if (g_zipfian_rng) {
       std::cerr << "  zipfian theta:              " << g_zipfian_theta << std::endl;
