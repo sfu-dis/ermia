@@ -100,21 +100,6 @@ target_link_libraries(ermia_SI ermia_si thread_pool)
 #set_target_properties(ermia_MVOCC PROPERTIES COMPILE_FLAGS "-DMVOCC")
 #target_link_libraries(ermia_MVOCC ermia_mvocc thread_pool)
 
-if(BUILD_TESTS)
-    set(BUILD_GMOCK OFF CACHE BOOL "Gmock Not Used")
-    set(INSTALL_GTEST OFF CACHE BOOL "Static Link Gtest")
-    add_subdirectory(third-party/googletest)
-
-    set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "No Testing For GoogleBenchmark Itself")
-    set(BENCHMARK_ENABLE_EXECEPTIONS OFF CACHE BOOL "No Exception For GoogleBenchmark")
-    set(BENCHMARK_ENABLE_LTO OFF CACHE BOOL "FIXME: Link Time Optimization leads to linking error")
-    set(BENCHMARK_USE_LIBCXX ON CACHE BOOL "Build GoogleBenchmark With libc++")
-    set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "Static Link GoogleBenchmark")
-    add_subdirectory(third-party/benchmark)
-
-    add_subdirectory(tests)
-endif()
-
 # Benchmark scripts
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/run.sh" DESTINATION ${CMAKE_BINARY_DIR})
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/run2.sh" DESTINATION ${CMAKE_BINARY_DIR})
