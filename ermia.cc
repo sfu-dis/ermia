@@ -289,8 +289,8 @@ PROMISE(bool) ConcurrentMasstreeIndex::InsertToDir(transaction *t, const varstr 
         dir_oid = oidmgr->alloc_oid(td->GetTupleFid());
         ALWAYS_ASSERT(dir_oid != INVALID_OID);
 
-        // TODO(jianqiuz): Is the size code okay? Also don't forget to add ASI FLAG for OID DIR
-        fat_ptr dirp = fat_ptr::make(oid_dir, 0, 0);
+        // TODO(jianqiuz): Is the size code okay?
+        fat_ptr dirp = fat_ptr::make(oid_dir, 0, fat_ptr::ASI_DIR_FLAG);
         oidmgr->oid_put_new(td->GetTupleFid(), dir_oid, dirp);
         DLOG(INFO) << "Insert the oid dir fat pointer addr: " << std::hex << dirp._ptr << ", Original addr: " << std::hex << oid_dir;
       }
@@ -331,7 +331,7 @@ static inline OID *find_empty_dir_entry(transaction *t, OID *chunk, ermia::Table
         ALWAYS_ASSERT(new_dir_oid != INVALID_OID);
 
         // TODO(jianqiuz): Is the size code okay? Also don't forget to add ASI FLAG for OID DIR
-        fat_ptr dirp = fat_ptr::make(oid_dir, 0, 0);
+        fat_ptr dirp = fat_ptr::make(oid_dir, 0, fat_ptr::ASI_DIR_FLAG);
         oidmgr->oid_put_new(td->GetTupleFid(), new_dir_oid, dirp);
         DLOG(INFO) << "Insert the oid subdir fat pointer addr: " << std::hex << dirp._ptr << ", Original addr: " << std::hex << oid_dir;
       }
@@ -344,8 +344,9 @@ static inline OID *find_empty_dir_entry(transaction *t, OID *chunk, ermia::Table
            }
        }
        // TODO(jianqiuz): Change the last entry to fat_ptr / ptr instead of using OID, which introduce one more indirection (cache miss)
-       auto sub_obj = oidmgr->oid_get(td->GetTupleFid(), p[OID_DIR_SIZE - 1]);
-       p = reinterpret_cast<OID *>(sub_obj.offset());
+       auto fptr = oidmgr->oid_get(td->GetTupleFid(), p[OID_DIR_SIZE - 1]);
+       ALWAYS_ASSERT(fptr.asi() & fat_ptr::ASI_DIR);
+       p = reinterpret_cast<OID *>(fptr.offset());
        depth -= 1;
    }
    return p + pos;

@@ -2,7 +2,6 @@
 #include <map>
 #include "dbcore/sm-common.h"
 #include "masstree/masstree_btree_noxid.h"
-#define OID_DIR_SIZE 4096
 
 namespace ermia {
 
