@@ -307,7 +307,6 @@ struct sm_oid_mgr {
     while (rec_count) {
         if (idx != OID_DIR_SIZE - 1) {
             DLOG(INFO) << "Pushing OID = 0x" << std::hex << cur_dir[idx] << " into outvec";
-            DLOG(INFO) << "OID_DIR_SIZE: " << OID_DIR_SIZE;
             out_vec.push_back(cur_dir[idx++]);
             rec_count -= 1;
             continue;

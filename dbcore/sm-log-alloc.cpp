@@ -225,10 +225,6 @@ void sm_log_alloc_mgr::dequeue_committed_xcts(uint64_t upto,
       }
       ALWAYS_ASSERT(raw_entry.context);
       if (raw_entry.context) {
-#ifndef NDEBUG
-        fprintf(stderr, "[ERMIA] Dequeue entry %p with context %p rLSN ", &raw_entry, raw_entry.context);
-        raw_entry.rlsn.print(true);
-#endif
         // TODO(jianqiuz): Check if there is any early call here
         raw_entry.post_commit_callback(raw_entry.context);
       }
@@ -288,10 +284,6 @@ void sm_log_alloc_mgr::dequeue_committed_xcts_multithreaded(uint32_t tid) {
         }
         ALWAYS_ASSERT(raw_entry.context);
         if (raw_entry.context) {
-  #ifndef NDEBUG
-          fprintf(stderr, "[ERMIA] Dequeue entry %p with context %p rLSN ", &raw_entry, raw_entry.context);
-          raw_entry.rlsn.print(true);
-  #endif
           // TODO(jianqiuz): Check if there is any early call here
           raw_entry.post_commit_callback(raw_entry.context);
         }
