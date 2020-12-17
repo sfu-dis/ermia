@@ -296,6 +296,28 @@ struct sm_oid_mgr {
   inline fat_ptr oid_get(oid_array *oa, OID o) { return *oa->get(o); }
   inline fat_ptr *oid_get_ptr(oid_array *oa, OID o) { return oa->get(o); }
 
+  bool oid_get_dir(oid_array *oa, OID o, std::vector<OID> &out_vec) {
+    auto p = oa->get(o);
+    ALWAYS_ASSERT(p->asi() & fat_ptr::ASI_DIR);
+    auto root_oid_ptr = reinterpret_cast<OID *>(p->offset());
+    auto rec_count = reinterpret_cast<uint32_t>(root_oid_ptr[0]);
+    /* Only the 0-level oid_dir record stores from index 1, 0 is used for store header */
+    auto idx = 1;
+    auto cur_dir = root_oid_ptr;
+    while (rec_count) {
+        if (idx != OID_DIR_SIZE - 1) {
+            DLOG(INFO) << "Pushing OID = 0x" << std::hex << cur_dir[idx] << " into outvec";
+            out_vec.push_back(cur_dir[idx++]);
+            rec_count -= 1;
+            continue;
+        }
+        cur_dir = reinterpret_cast<OID *>(oa->get(cur_dir[idx])->offset());
+        DLOG(INFO) << "Following the next level sub-dir: " << cur_dir;
+        idx = 0;
+    }
+    return true;
+  }
+
   bool file_exists(FID f);
   void recreate_file(FID f);              // for recovery only
   void recreate_allocator(FID f, OID m);  // for recovery only

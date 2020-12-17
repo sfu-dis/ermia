@@ -148,7 +148,7 @@ public:
 
   virtual PROMISE(void) GetRecord(transaction *t, rc_t &rc, const varstr &key, varstr &value,
                          OID *out_oid = nullptr) override;
-  virtual PROMISE(void) GetRecordMulti(transaction *t, rc_t &rc, const varstr &key, std::vector<varstr&> &value,
+  virtual PROMISE(void) GetRecordMulti(transaction *t, rc_t &rc, const varstr &key, std::vector<varstr> &value,
                            std::vector<OID> *oids = nullptr);
 
 

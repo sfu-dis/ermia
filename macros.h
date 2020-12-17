@@ -31,6 +31,7 @@
 #define ARRAY_NELEMS(a) (sizeof(a)/sizeof((a)[0]))
 
 #define VERBOSE(expr) ((void)0)
+#define OID_DIR_SIZE 4096
 //#define VERBOSE(expr) (expr)
 
 #define NOP_PAUSE asm volatile("pause" : :)

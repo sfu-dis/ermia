@@ -155,8 +155,51 @@ std::map<std::string, uint64_t> ConcurrentMasstreeIndex::Clear() {
 }
 
 PROMISE(void) ConcurrentMasstreeIndex::GetRecordMulti(transaction *t, rc_t &rc, const varstr &key, 
-        std::vector<varstr&> &value, std::vector<OID> *out_oid) {
-    RETURN;
+        std::vector<varstr> &result_vec, std::vector<OID> *out_oid) {
+    rc = {RC_INVALID};
+    OID dir_oid = INVALID_OID;
+    std::vector<OID> oids;
+    ermia::varstr tmpval;
+    if (!t) {
+        auto e = MM::epoch_enter();
+        rc._val = AWAIT masstree_.search(key, dir_oid, e, nullptr) ? RC_TRUE : RC_FALSE;
+        MM::epoch_exit(0, e);
+    } else {
+        t->ensure_active();
+        bool found = AWAIT masstree_.search(key, dir_oid, t->xc->begin_epoch, nullptr);
+        dbtuple *tuple = nullptr;
+        if (found) {
+            LOG_IF(FATAL, config::is_backup_srv()) << "GetRecordMulti is not supportted for backup server";
+            bool ok = oidmgr->oid_get_dir(table_descriptor->GetTupleArray(), dir_oid, oids);
+            ALWAYS_ASSERT(ok);
+            for (auto &o : oids) {
+                tuple = AWAIT oidmgr->oid_get_version(table_descriptor->GetTupleArray(), o, t->xc);
+                if (!tuple) {
+                    DLOG(WARNING) << "(SKIPPED) Some tuple is empty: OID = " << std::hex << o;
+                    found = false;
+                }
+
+                if (found) {
+                  bool ret = t->DoTupleRead(tuple, &tmpval)._val;
+                  if (!ret) {
+                      DLOG(WARNING) << "(SKIPPED) Cannot do tuple read for OID = " << std::hex << o;
+                      continue;
+                  }
+                  result_vec.push_back(tmpval);
+                } else if (config::phantom_prot) {
+                  // volatile_write(rc._val, DoNodeRead(t, sinfo.first, sinfo.second)._val);
+                } else {
+                    continue;
+                }
+            }
+            volatile_write(rc._val, RC_TRUE);
+            RETURN;
+        } else {
+            volatile_write(rc._val, RC_FALSE);
+            RETURN;
+        }
+    }
+
 }
 
 PROMISE(void) ConcurrentMasstreeIndex::GetRecord(transaction *t, rc_t &rc, const varstr &key,
@@ -265,36 +308,47 @@ PROMISE(bool) ConcurrentMasstreeIndex::InsertOID(transaction *t, const varstr &k
 
 static inline OID *find_empty_dir_entry(transaction *t, OID *chunk, ermia::TableDescriptor *td);
 
-// TODO(jianqiuz): Create a new entry in the OID Object and insert the oid
+/* OID_DIR Object structure:
+ * OID_DIR is an array that stores the OID to the real data, the last entry for in the OID_DIR object
+ * Stores the OID to another OID_DIR Object (sub-dir), so that the OID_DIR size can be very large (2^32 - 1)
+ * The first level OID_DIR Object is special, the first entry stores the number of oid(with data) in current OID_DIR.
+ */
 // TODO(jianqiuz): Uniqueness check for OID dir. We shouldn't have two same OID entry in one OID Dir.
 PROMISE(bool) ConcurrentMasstreeIndex::InsertToDir(transaction *t, const varstr &key, OID oid) {
   ALWAYS_ASSERT(!this->IsUnique());
+  t->ensure_active();
   OID dir_oid = INVALID_OID;
-  auto e = MM::epoch_enter();
-  auto found = AWAIT masstree_.search(key, dir_oid, e);
+  auto found = AWAIT masstree_.search(key, dir_oid, t->xc->begin_epoch);
   auto td = this->GetTableDescriptor();
   ALWAYS_ASSERT(td);
   /* Empty entry, create and insert the first record */
   if (!found) {
+      DLOG(INFO) << "Insert the first entry to oid-dir";
       uint32_t size = sizeof(OID) * OID_DIR_SIZE;
-      auto chunk = reinterpret_cast<char *>(MM::allocate(size));
-      ermia::varstr dir_obj(chunk, size);
+      OID *oid_dir = reinterpret_cast<OID *>(MM::allocate(size));
+      oid_dir[0] = 1;
+      oid_dir[1] = oid;
+      {
+        dir_oid = oidmgr->alloc_oid(td->GetTupleFid());
+        ALWAYS_ASSERT(dir_oid != INVALID_OID);
 
-      auto dirp = reinterpret_cast<OID *>(dir_obj.data());
-      dirp[0] = 1;
-      dirp[1] = oid;
-      t->Insert(td, &dir_obj);
-      MM::epoch_exit(0, e);
+        // TODO(jianqiuz): Is the size code okay?
+        fat_ptr dirp = fat_ptr::make(oid_dir, 0, fat_ptr::ASI_DIR_FLAG);
+        oidmgr->oid_put_new(td->GetTupleFid(), dir_oid, dirp);
+        DLOG(INFO) << "Insert the oid dir fat pointer addr: " << std::hex << dirp._ptr << ", Original addr: " << std::hex << oid_dir;
+      }
+      bool ok = AWAIT masstree_.insert(key, dir_oid, t->xc);
+      ALWAYS_ASSERT(ok);
       return true;
   }
   auto dirp = oidmgr->oid_get(td->GetTupleFid(), dir_oid);
+  DLOG(INFO) << "Get the oid dir pointer addr: " << std::hex << dirp.offset();
   ALWAYS_ASSERT(dirp._ptr);
-  auto slot = find_empty_dir_entry(t, dirp, td);
+  auto oid_dir = reinterpret_cast<OID *>(dirp.offset());
+  auto slot = find_empty_dir_entry(t, oid_dir, td);
   // TODO(jianqiuz): Can we do in place update here?
-  auto p = reinterpret_cast<OID *>(dirp._ptr);
-  p[0] += 1;
+  oid_dir[0] += 1;
   *slot = oid;
-  MM::epoch_exit(0, e);
   return true;
 }
 
@@ -305,29 +359,38 @@ static inline OID *find_empty_dir_entry(transaction *t, OID *chunk, ermia::Table
     }
     OID *result = nullptr;
     const uint32_t rec_count = reinterpret_cast<uint32_t>(chunk[0]);
+    DLOG(INFO) << "Current record count = " << rec_count;
     auto depth = (rec_count + 1) / (OID_DIR_SIZE - 1);
     auto pos = (rec_count + 1) % (OID_DIR_SIZE - 1);
+    DLOG(INFO) << "Insert the record into oid_dir depth = " << depth << " index = " << pos;
     OID new_dir_oid = INVALID_OID;
     if (!pos) {
       /* Allocate a new oid dir list */
       uint32_t size = sizeof(OID) * OID_DIR_SIZE;
-      auto mem = reinterpret_cast<char *>(MM::allocate(size));
-      ermia::varstr dir_obj(mem, size);
-      auto dirp = reinterpret_cast<OID *>(dir_obj.data());
-      result = dirp;
-      new_dir_oid = t->Insert(td, &dir_obj);
-      depth -= 1;
+      auto oid_dir = reinterpret_cast<OID *>(MM::allocate(size));
+
+      {
+        new_dir_oid = oidmgr->alloc_oid(td->GetTupleFid());
+        ALWAYS_ASSERT(new_dir_oid != INVALID_OID);
+
+        // TODO(jianqiuz): Is the size code okay? Also don't forget to add ASI FLAG for OID DIR
+        fat_ptr dirp = fat_ptr::make(oid_dir, 0, fat_ptr::ASI_DIR_FLAG);
+        oidmgr->oid_put_new(td->GetTupleFid(), new_dir_oid, dirp);
+        DLOG(INFO) << "Insert the oid subdir fat pointer addr: " << std::hex << dirp._ptr << ", Original addr: " << std::hex << oid_dir;
+      }
    }
    auto p = chunk;
    while(depth > 0) {
-       auto sub_obj = oidmgr->oid_get(td->GetTupleFid(), p[OID_DIR_SIZE - 1]);
-       p = reinterpret_cast<OID *>(sub_obj._ptr);
+       if (new_dir_oid != INVALID_OID) {
+           if (depth == 1) {
+               p[OID_DIR_SIZE - 1] = new_dir_oid;
+           }
+       }
+       // TODO(jianqiuz): Change the last entry to fat_ptr / ptr instead of using OID, which introduce one more indirection (cache miss)
+       auto fptr = oidmgr->oid_get(td->GetTupleFid(), p[OID_DIR_SIZE - 1]);
+       ALWAYS_ASSERT(fptr.asi() & fat_ptr::ASI_DIR);
+       p = reinterpret_cast<OID *>(fptr.offset());
        depth -= 1;
-   }
-   if (new_dir_oid != INVALID_OID) {
-       /* Update the last entry in the previous dir list */
-       p[OID_DIR_SIZE - 1] = new_dir_oid;
-       return result;
    }
    return p + pos;
 }

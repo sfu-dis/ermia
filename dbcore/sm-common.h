@@ -112,16 +112,18 @@ struct fat_ptr {
   static uint64_t const ASI_EXT = 0x30;
   static uint64_t const ASI_XID = 0x40;
   static uint64_t const ASI_CHK = 0x50;
+  static uint64_t const ASI_DIR = 0x60;
 
   static uint64_t const ASI_LOG_FLAG = ASI_LOG << ASI_START_BIT;
   static uint64_t const ASI_HEAP_FLAG = ASI_HEAP << ASI_START_BIT;
   static uint64_t const ASI_EXT_FLAG = ASI_EXT << ASI_START_BIT;
   static uint64_t const ASI_XID_FLAG = ASI_XID << ASI_START_BIT;
   static uint64_t const ASI_CHK_FLAG = ASI_CHK << ASI_START_BIT;
+  static uint64_t const ASI_DIR_FLAG = ASI_DIR << ASI_START_BIT;
 
   static uint64_t const ASI_SEGMENT_MASK = 0x0f;
 
-  static_assert(not((ASI_LOG | ASI_HEAP | ASI_EXT | ASI_XID | ASI_CHK) &
+  static_assert(not((ASI_LOG | ASI_HEAP | ASI_EXT | ASI_XID | ASI_CHK | ASI_DIR) &
                     ~ASI_MASK),
                 "Go fix ASI_MASK");
   static_assert(NUM_LOG_SEGMENTS == 16, "The constant above is out of sync");
