@@ -1098,9 +1098,9 @@ void sm_log_alloc_mgr::_log_write_daemon() {
             return _dequeue_finished_counter == config::dequeue_threads;
           });
           write_daemon_lock.unlock();
-          */
           util::timer t;
           dequeue_committed_xcts(_durable_flushed_lsn_offset, t.get_start());
+          */
           if (ret == ETIMEDOUT) {
             // We run out of time, stop sleeping and wake up once
             break;
