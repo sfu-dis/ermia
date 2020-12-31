@@ -613,7 +613,7 @@ public:
     int min = std::min((int)boundary_->size(), key.prefix_length());
     int cmp = memcmp(boundary_->data(), key.full_string().data(), min);
     if (!Reverse) {
-      if (cmp < 0 || (cmp == 0 && boundary_->size() <= key.prefix_length()))
+      if (cmp < 0 || (cmp == 0 && (int)boundary_->size() <= (int)key.prefix_length()))
         boundary_compar_ = true;
       else if (cmp == 0) {
         uint64_t last_ikey =
