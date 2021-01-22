@@ -111,16 +111,6 @@ struct sm_log_alloc_mgr {
   bool _write_daemon_should_wake;
   bool _write_daemon_should_stop;
   
-  /*
-  std::thread *_dequeue_threads;
-  std::map<uint32_t, bool> _dequeue_threads_status;
-  std::mutex _wait_dequeue_mutex;
-  std::mutex _wake_write_daemon_mutex;
-  std::condition_variable _dequeue_cv;
-  std::condition_variable _wake_write_daemon_cv;
-  std::atomic<uint32_t> _dequeue_finished_counter;
-  */
-
   // tzwang: use one _tls_lsn_offset per worker thread to record its
   // most-recently committed/aborted transaction's log lsn offset. This array
   // together is used to replace the rcu-slist as a result of the decoupling of
