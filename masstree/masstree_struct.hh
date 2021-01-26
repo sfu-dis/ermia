@@ -20,7 +20,6 @@
 #include "stringbag.hh"
 #include "mtcounters.hh"
 #include "timestamp.hh"
-#include "../dbcore/sm-coroutine.h"
 namespace Masstree {
 
 template <typename P>
@@ -94,7 +93,7 @@ class node_base : public make_nodeversion<P>::type {
     return x;
   }
 
-  inline PROMISE(leaf_type*) reach_leaf(const key_type& k, nodeversion_type& version,
+  inline leaf_type *reach_leaf(const key_type& k, nodeversion_type& version,
                                               threadinfo& ti) const;
 
   void prefetch_full() const {
@@ -492,7 +491,7 @@ void basic_table<P>::initialize(threadinfo& ti) {
   root_ = node_type::leaf_type::make_root(0, 0, ti);
 }
 
-/** @brief Return this node's parent in locked state.
+/** @brief return this node's parent in locked state.
     @pre this->locked()
     @post this->parent() == result && (!result || result->locked()) */
 template <typename P>
@@ -513,7 +512,7 @@ internode<P>* node_base<P>::locked_parent(threadinfo& ti) const {
   return static_cast<internode<P>*>(p);
 }
 
-/** @brief Return the result of compare_key(k, LAST KEY IN NODE).
+/** @brief return the result of compare_key(k, LAST KEY IN NODE).
 
     Reruns the comparison until a stable comparison is obtained. */
 template <typename P>
@@ -540,11 +539,11 @@ inline int leaf<P>::stable_last_key_compare(const key_type& k,
   }
 }
 
-/** @brief Return the leaf in this tree layer responsible for @a ka.
+/** @brief return the leaf in this tree layer responsible for @a ka.
 
     Returns a stable leaf. Sets @a version to the stable version. */
 template <typename P>
-inline PROMISE(leaf<P>*) node_base<P>::reach_leaf(
+inline leaf<P> *node_base<P>::reach_leaf(
                                          const key_type& ka,
                                          nodeversion_type& version,
                                          threadinfo& ti) const {
@@ -568,7 +567,6 @@ retry:
   while (!v[sense].isleaf()) {
     const internode<P>* in = static_cast<const internode<P>*>(n[sense]);
     in->prefetch();
-    SUSPEND;
     int kp = internode<P>::bound_type::upper(ka, *in);
     n[!sense] = in->child_[kp];
     if (!n[!sense]) goto retry;
@@ -588,10 +586,10 @@ retry:
   }
 
   version = v[sense];
-  RETURN const_cast<leaf<P>*>(static_cast<const leaf<P>*>(n[sense]));
+  return const_cast<leaf<P>*>(static_cast<const leaf<P>*>(n[sense]));
 }
 
-/** @brief Return the leaf at or after *this responsible for @a ka.
+/** @brief return the leaf at or after *this responsible for @a ka.
     @pre *this was responsible for @a ka at version @a v
 
     Checks whether *this has split since version @a v. If it has split, then

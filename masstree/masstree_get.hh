@@ -17,29 +17,26 @@
 #define MASSTREE_GET_HH 1
 #include "masstree_tcursor.hh"
 #include "masstree_key.hh"
-#include "../dbcore/sm-coroutine.h"
 namespace Masstree {
 
 template <typename P>
-PROMISE(bool) unlocked_tcursor<P>::find_unlocked(threadinfo& ti) {
+bool unlocked_tcursor<P>::find_unlocked(threadinfo& ti) {
   int match;
   key_indexed_position kx;
   node_base<P>* root = const_cast<node_base<P>*>(root_);
 
 retry:
-  n_ = AWAIT root->reach_leaf(ka_, v_, ti);
+  n_ = root->reach_leaf(ka_, v_, ti);
 
 forward:
   if (v_.deleted()) goto retry;
 
   n_->prefetch();
-  SUSPEND;
   perm_ = n_->permutation();
   kx = leaf<P>::bound_type::lower(ka_, *this);
   if (kx.p >= 0) {
     lv_ = n_->lv_[kx.p];
     lv_.prefetch(n_->keylenx_[kx.p]);
-    SUSPEND;
     match = n_->ksuf_matches(kx.p, ka_);
   } else
     match = 0;
@@ -53,27 +50,27 @@ forward:
     root = lv_.layer();
     goto retry;
   } else
-    RETURN match;
+    return match;
 }
 
 template <typename P>
-inline PROMISE(bool) basic_table<P>::get(
+inline bool basic_table<P>::get(
                                 Str key, value_type& value,
                                 threadinfo& ti) const {
   unlocked_tcursor<P> lp(*this, key);
-  bool found = AWAIT lp.find_unlocked(ti);
+  bool found = lp.find_unlocked(ti);
   if (found) value = lp.value();
-  RETURN found;
+  return found;
 }
 
 template <typename P>
-PROMISE(bool) tcursor<P>::find_locked(threadinfo& ti) {
+bool tcursor<P>::find_locked(threadinfo& ti) {
   node_base<P>* root = const_cast<node_base<P>*>(root_);
   nodeversion_type v;
   permuter_type perm;
 
 retry:
-  n_ = AWAIT root->reach_leaf(ka_, v, ti);
+  n_ = root->reach_leaf(ka_, v, ti);
 
 forward:
   if (v.deleted()) goto retry;
@@ -109,7 +106,7 @@ forward:
     root = const_cast<node_base<P>*>(root_);
     goto retry;
   }
-  RETURN state_;
+  return state_;
 }
 
 }  // namespace Masstree

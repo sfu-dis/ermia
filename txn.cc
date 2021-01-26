@@ -1274,7 +1274,7 @@ rc_t transaction::Update(TableDescriptor *td, OID oid, const varstr *k, varstr *
 
     ASSERT(not tuple->pvalue or tuple->pvalue->size() == tuple->size);
     ASSERT(tuple->GetObject()->GetClsn().asi_type() == fat_ptr::ASI_XID);
-    ASSERT(sync_wait_coro(oidmgr->oid_get_version(tuple_fid, oid, xc)) == tuple);
+    ASSERT(oidmgr->oid_get_version(tuple_fid, oid, xc) == tuple);
     ASSERT(log);
 
     // FIXME(tzwang): mark deleted in all 2nd indexes as well?

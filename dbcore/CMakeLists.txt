@@ -20,7 +20,6 @@ set(DBCORE_SRC
   ${CMAKE_CURRENT_SOURCE_DIR}/sm-cmd-log.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sm-common.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sm-config.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/sm-coroutine.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sm-exceptions.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sm-table.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sm-log-alloc.cpp

@@ -25,7 +25,6 @@
 #include "timestamp.hh"
 
 #include "../dbcore/sm-alloc.h"
-#include "../dbcore/sm-coroutine.h"
 #include "../dbcore/sm-table.h"
 #include "../tuple.h"
 

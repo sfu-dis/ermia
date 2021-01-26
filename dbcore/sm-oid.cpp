@@ -794,7 +794,7 @@ dbtuple *sm_oid_mgr::oid_get_latest_version(FID f, OID o) {
   return oid_get_latest_version(get_impl(this)->get_array(f), o);
 }
 
-PROMISE(dbtuple *) sm_oid_mgr::oid_get_version(FID f, OID o, TXN::xid_context *visitor_xc) {
+dbtuple *sm_oid_mgr::oid_get_version(FID f, OID o, TXN::xid_context *visitor_xc) {
   ASSERT(f);
   return oid_get_version(get_impl(this)->get_array(f), o, visitor_xc);
 }
@@ -802,7 +802,7 @@ PROMISE(dbtuple *) sm_oid_mgr::oid_get_version(FID f, OID o, TXN::xid_context *v
 dbtuple *sm_oid_mgr::BackupGetVersion(oid_array *ta, oid_array *pa, OID o,
                                       TXN::xid_context *xc) {
   if (config::full_replay || config::command_log) {
-    return sync_wait_coro(oid_get_version(ta, o, xc));
+    return oid_get_version(ta, o, xc);
   }
   fat_ptr pdest_head_ptr = NULL_PTR;
 retry:
@@ -818,7 +818,7 @@ retry:
   if (active_head_lsn >= xc->begin) {
     // First version not visible to me, so no need to look at the pdest
     // array, versions indexed by the tuple array are enough.
-    return sync_wait_coro(oid_get_version(ta, o, xc));
+    return oid_get_version(ta, o, xc);
   } else {
     // First version visible to me, but not sure if there will be newer
     // versions available for me to read, must look at the pdest array
@@ -962,7 +962,7 @@ void sm_oid_mgr::oid_get_version_backup(fat_ptr &ptr,
 }
 
 // For tuple arrays only, i.e., entries are guaranteed to point to Objects.
-PROMISE(dbtuple *) sm_oid_mgr::oid_get_version(oid_array *oa, OID o,
+dbtuple *sm_oid_mgr::oid_get_version(oid_array *oa, OID o,
                                      TXN::xid_context *visitor_xc) {
   fat_ptr *entry = oa->get(o);
 start_over:
@@ -994,8 +994,6 @@ start_over:
     } else {
       ASSERT(ptr.asi_type() == 0);
       cur_obj = (Object *)ptr.offset();
-      ::prefetch((const char*)cur_obj);
-      SUSPEND;
       tentative_next = cur_obj->GetNextVolatile();
       ASSERT(tentative_next.asi_type() == 0);
     }
@@ -1006,12 +1004,12 @@ start_over:
       goto start_over;
     }
     if (visible) {
-      RETURN cur_obj->GetPinnedTuple();
+      return cur_obj->GetPinnedTuple();
     }
     ptr = tentative_next;
     prev_obj = cur_obj;
   }
-  RETURN nullptr;  // No Visible records
+  return nullptr;  // No Visible records
 }
 
 bool sm_oid_mgr::TestVisibility(Object *object, TXN::xid_context *xc, bool &retry) {

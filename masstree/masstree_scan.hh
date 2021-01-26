@@ -53,10 +53,10 @@ private:
   scanstackelt() {}
 
   template <typename H>
-  PROMISE(int) find_initial(H &helper, key_type &ka, bool emit_equal,
+  int find_initial(H &helper, key_type &ka, bool emit_equal,
                                   leafvalue_type &entry, threadinfo &ti);
   template <typename H> 
-  PROMISE(int) find_retry(H &helper, key_type &ka, threadinfo &ti);
+  int find_retry(H &helper, key_type &ka, threadinfo &ti);
   template <typename H>
   int find_next(H &helper, key_type &ka, leafvalue_type &entry);
 
@@ -158,14 +158,14 @@ private:
 
 template <typename P>
 template <typename H>
-PROMISE(int) scanstackelt<P>::find_initial(H &helper, key_type &ka, bool emit_equal,
+int scanstackelt<P>::find_initial(H &helper, key_type &ka, bool emit_equal,
                                                  leafvalue_type &entry, threadinfo &ti) {
   int kp, keylenx = 0;
   char suffixbuf[MASSTREE_MAXKEYLEN];
   Str suffix;
 
 retry_root:
-  n_ = AWAIT root_->reach_leaf(ka, v_, ti);
+  n_ = root_->reach_leaf(ka, v_, ti);
 
 retry_node:
   if (v_.deleted())
@@ -193,35 +193,35 @@ retry_node:
   if (kp >= 0) {
     if (n_->keylenx_is_layer(keylenx)) {
       this[1].root_ = entry.layer();
-      RETURN scan_down;
+      return scan_down;
     } else if (n_->keylenx_has_ksuf(keylenx)) {
       int ksuf_compare = suffix.compare(ka.suffix());
       if (helper.initial_ksuf_match(ksuf_compare, emit_equal)) {
         int keylen = ka.assign_store_suffix(suffix);
         ka.assign_store_length(keylen);
-        RETURN scan_emit;
+        return scan_emit;
       }
     } else if (emit_equal)
-      RETURN scan_emit;
+      return scan_emit;
     // otherwise, this entry must be skipped
     ki_ = helper.next(ki_);
   }
 
-  RETURN scan_find_next;
+  return scan_find_next;
 }
 
 template <typename P>
 template <typename H>
-PROMISE(int) scanstackelt<P>::find_retry(H &helper, key_type &ka, threadinfo &ti) {
+int scanstackelt<P>::find_retry(H &helper, key_type &ka, threadinfo &ti) {
 retry:
-  n_ = AWAIT root_->reach_leaf(ka, v_, ti);
+  n_ = root_->reach_leaf(ka, v_, ti);
   if (v_.deleted())
     goto retry;
 
   n_->prefetch();
   perm_ = n_->permutation();
   ki_ = helper.lower(ka, this);
-  RETURN scan_find_next;
+  return scan_find_next;
 }
 
 template <typename P>
@@ -279,7 +279,7 @@ changed:
 
 template <typename P>
 template <typename H, typename F>
-PROMISE(int) basic_table<P>::scan(H helper, Str firstkey, bool emit_firstkey, F &scanner,
+int basic_table<P>::scan(H helper, Str firstkey, bool emit_firstkey, F &scanner,
                                         ermia::TXN::xid_context *xc, threadinfo &ti) const {
   typedef typename P::ikey_type ikey_type;
   typedef typename node_type::key_type key_type;
@@ -304,7 +304,7 @@ PROMISE(int) basic_table<P>::scan(H helper, Str firstkey, bool emit_firstkey, F 
   int state;
 
   while (1) {
-    state = AWAIT stack[stackpos].find_initial(helper, ka, emit_firstkey, entry, ti);
+    state = stack[stackpos].find_initial(helper, ka, emit_firstkey, entry, ti);
     scanner.visit_leaf(stack[stackpos], ka, ti);
     if (state != mystack_type::scan_down)
       break;
@@ -321,7 +321,7 @@ PROMISE(int) basic_table<P>::scan(H helper, Str firstkey, bool emit_firstkey, F 
       if (ermia::config::is_backup_srv()) {
         v = ermia::oidmgr->BackupGetVersion(tuple_array_, pdest_array_, o, xc);
       } else {
-        v = AWAIT ermia::oidmgr->oid_get_version(tuple_array_, o, xc);
+        v = ermia::oidmgr->oid_get_version(tuple_array_, o, xc);
       }
       if (v) {
         if (!scanner.visit_value(ka, v))
@@ -354,32 +354,32 @@ PROMISE(int) basic_table<P>::scan(H helper, Str firstkey, bool emit_firstkey, F 
 
     case mystack_type::scan_retry:
     retry:
-      state = AWAIT stack[stackpos].find_retry(helper, ka, ti);
+      state = stack[stackpos].find_retry(helper, ka, ti);
       break;
     }
   }
 
 done:
-  RETURN scancount;
+  return scancount;
 }
 
 template <typename P>
 template <typename F>
-PROMISE(int) basic_table<P>::scan(Str firstkey, bool emit_firstkey, F &scanner,
+int basic_table<P>::scan(Str firstkey, bool emit_firstkey, F &scanner,
                          ermia::TXN::xid_context *xc, threadinfo &ti) const {
   return scan(forward_scan_helper(), firstkey, emit_firstkey, scanner, xc, ti);
 }
 
 template <typename P>
 template <typename F>
-PROMISE(int) basic_table<P>::rscan(Str firstkey, bool emit_firstkey, F &scanner,
+int basic_table<P>::rscan(Str firstkey, bool emit_firstkey, F &scanner,
                           ermia::TXN::xid_context *xc, threadinfo &ti) const {
   return scan(reverse_scan_helper(), firstkey, emit_firstkey, scanner, xc, ti);
 }
 
 template <typename P>
 template <typename H, typename F>
-PROMISE(int) basic_table<P>::scan_oid(H helper, Str firstkey, bool emit_firstkey, F &scanner,
+int basic_table<P>::scan_oid(H helper, Str firstkey, bool emit_firstkey, F &scanner,
                                             ermia::TXN::xid_context *xc, threadinfo &ti) const {
   MARK_REFERENCED(xc);
   typedef typename P::ikey_type ikey_type;
@@ -405,7 +405,7 @@ PROMISE(int) basic_table<P>::scan_oid(H helper, Str firstkey, bool emit_firstkey
   int state;
 
   while (1) {
-    state = AWAIT stack[stackpos].find_initial(helper, ka, emit_firstkey, entry, ti);
+    state = stack[stackpos].find_initial(helper, ka, emit_firstkey, entry, ti);
     scanner.visit_leaf(stack[stackpos], ka, ti);
     if (state != mystack_type::scan_down)
       break;
@@ -447,25 +447,25 @@ PROMISE(int) basic_table<P>::scan_oid(H helper, Str firstkey, bool emit_firstkey
 
     case mystack_type::scan_retry:
     retry:
-      state = AWAIT stack[stackpos].find_retry(helper, ka, ti);
+      state = stack[stackpos].find_retry(helper, ka, ti);
       break;
     }
   }
 
 done:
-  RETURN scancount;
+  return scancount;
 }
 
 template <typename P>
 template <typename F>
-PROMISE(int) basic_table<P>::scan_oid(Str firstkey, bool emit_firstkey, F &scanner,
+int basic_table<P>::scan_oid(Str firstkey, bool emit_firstkey, F &scanner,
                                             ermia::TXN::xid_context *xc, threadinfo &ti) const {
   return scan_oid(forward_scan_helper(), firstkey, emit_firstkey, scanner, xc, ti);
 }
 
 template <typename P>
 template <typename F>
-PROMISE(int) basic_table<P>::rscan_oid(Str firstkey, bool emit_firstkey, F &scanner,
+int basic_table<P>::rscan_oid(Str firstkey, bool emit_firstkey, F &scanner,
                           ermia::TXN::xid_context *xc, threadinfo &ti) const {
   return scan_oid(reverse_scan_helper(), firstkey, emit_firstkey, scanner, xc, ti);
 }

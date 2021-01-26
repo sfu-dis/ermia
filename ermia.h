@@ -4,7 +4,6 @@
 #include "txn.h"
 #include "../benchmarks/record/encoder.h"
 #include "ermia_internal.h"
-#include <experimental/coroutine>
 
 namespace ermia {
 
@@ -21,7 +20,6 @@ public:
 
   // All supported index types
   static const uint16_t kIndexConcurrentMasstree = 0x1;
-  static const uint16_t kIndexDecoupledMasstree = 0x2;
 
   // Create a table without any index (at least yet)
   TableDescriptor *CreateTable(const char *name);
@@ -146,20 +144,17 @@ public:
 
   inline void *GetTable() override { return masstree_.get_table(); }
 
-  virtual PROMISE(void) GetRecord(transaction *t, rc_t &rc, const varstr &key, varstr &value,
+  virtual void GetRecord(transaction *t, rc_t &rc, const varstr &key, varstr &value,
                          OID *out_oid = nullptr) override;
-  virtual PROMISE(void) GetRecordMulti(transaction *t, rc_t &rc, const varstr &key, std::vector<varstr> &value,
-                           std::vector<OID> *oids = nullptr);
 
+  rc_t UpdateRecord(transaction *t, const varstr &key, varstr &value) override;
+  rc_t InsertRecord(transaction *t, const varstr &key, varstr &value, OID *out_oid = nullptr) override;
+  rc_t RemoveRecord(transaction *t, const varstr &key) override;
+  bool InsertOID(transaction *t, const varstr &key, OID oid) override;
 
-  PROMISE(rc_t) UpdateRecord(transaction *t, const varstr &key, varstr &value) override;
-  PROMISE(rc_t) InsertRecord(transaction *t, const varstr &key, varstr &value, OID *out_oid = nullptr) override;
-  PROMISE(rc_t) RemoveRecord(transaction *t, const varstr &key) override;
-  PROMISE(bool) InsertOID(transaction *t, const varstr &key, OID oid) override;
-
-  PROMISE(rc_t) Scan(transaction *t, const varstr &start_key, const varstr *end_key,
+  rc_t Scan(transaction *t, const varstr &start_key, const varstr *end_key,
                      ScanCallback &callback, str_arena *arena) override;
-  PROMISE(rc_t) ReverseScan(transaction *t, const varstr &start_key,
+  rc_t ReverseScan(transaction *t, const varstr &start_key,
                             const varstr *end_key, ScanCallback &callback,
                             str_arena *arena) override;
 
@@ -167,15 +162,15 @@ public:
   std::map<std::string, uint64_t> Clear() override;
   inline void SetArrays(bool primary) override { masstree_.set_arrays(table_descriptor, primary); }
 
-  inline PROMISE(void)
+  inline void
   GetOID(const varstr &key, rc_t &rc, TXN::xid_context *xc, OID &out_oid,
          ConcurrentMasstree::versioned_node_t *out_sinfo = nullptr) override {
-    bool found = AWAIT masstree_.search(key, out_oid, xc->begin_epoch, out_sinfo);
+    bool found = masstree_.search(key, out_oid, xc->begin_epoch, out_sinfo);
     volatile_write(rc._val, found ? RC_TRUE : RC_FALSE);
   }
 
 private:
-  PROMISE(bool) InsertIfAbsent(transaction *t, const varstr &key, OID oid) override;
-  PROMISE(bool) InsertToDir(transaction *t, const varstr &key, OID oid);
+  bool InsertIfAbsent(transaction *t, const varstr &key, OID oid) override;
+  bool InsertToDir(transaction *t, const varstr &key, OID oid);
 };
 } // namespace ermia

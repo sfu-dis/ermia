@@ -22,7 +22,6 @@
 #include "timestamp.hh"
 
 #include "../dbcore/sm-alloc.h"
-#include "../dbcore/sm-coroutine.h"
 #include "../dbcore/sm-table.h"
 #include "../tuple.h"
 
@@ -192,7 +191,7 @@ public:
   /** NOTE: the public interface assumes that the caller has taken care
    * of setting up RCU */
 
-  inline PROMISE(bool) search(const key_type &k, OID &o, epoch_num e,
+  inline bool search(const key_type &k, OID &o, epoch_num e,
                      versioned_node_t *search_info = nullptr) const;
 
   /**
@@ -267,20 +266,20 @@ public:
    *   B) no concurrent mutation of string
    * note that string contents upon return are arbitrary
    */
-  PROMISE(void) search_range_call(const key_type &lower, const key_type *upper,
+  void search_range_call(const key_type &lower, const key_type *upper,
                          low_level_search_range_callback &callback,
                          TXN::xid_context *xc) const;
 
   // (lower, upper]
-  PROMISE(void) rsearch_range_call(const key_type &upper, const key_type *lower,
+  void rsearch_range_call(const key_type &upper, const key_type *lower,
                           low_level_search_range_callback &callback,
                           TXN::xid_context *xc) const;
 
-  PROMISE(int) search_range_oid(const key_type &lower, const key_type *upper,
+  int search_range_oid(const key_type &lower, const key_type *upper,
                        low_level_search_range_callback &callback,
                        TXN::xid_context *xc) const;
 
-  PROMISE(int) rsearch_range_oid(const key_type &upper, const key_type *lower,
+  int rsearch_range_oid(const key_type &upper, const key_type *lower,
                         low_level_search_range_callback &callback,
                         TXN::xid_context *xc) const;
 
@@ -309,7 +308,7 @@ public:
    * where the callback returns true if it wants to keep going, false otherwise
    */
   template <typename F>
-  inline PROMISE(void) search_range(const key_type &lower, const key_type *upper,
+  inline void search_range(const key_type &lower, const key_type *upper,
                            F &callback, TXN::xid_context *xc) const;
 
   /**
@@ -320,7 +319,7 @@ public:
    * where the callback returns true if it wants to keep going, false otherwise
    */
   template <typename F>
-  inline PROMISE(void) rsearch_range(const key_type &upper, const key_type *lower,
+  inline void rsearch_range(const key_type &upper, const key_type *lower,
                             F &callback, TXN::xid_context *xc) const;
 
   /**
@@ -330,7 +329,7 @@ public:
    * If false and old_v is not NULL, then the overwritten value of v
    * is written into old_v
    */
-  inline PROMISE(bool) insert(const key_type &k, OID o, TXN::xid_context *xc,
+  inline bool insert(const key_type &k, OID o, TXN::xid_context *xc,
                      value_type *old_oid = NULL,
                      insert_info_t *insert_info = NULL);
 
@@ -338,7 +337,7 @@ public:
    * Only puts k=>v if k does not exist in map. returns true
    * if k inserted, false otherwise (k exists already)
    */
-  inline PROMISE(bool) insert_if_absent(const key_type &k, OID o, TXN::xid_context *xc,
+  inline bool insert_if_absent(const key_type &k, OID o, TXN::xid_context *xc,
                                insert_info_t *insert_info = NULL);
 
   /**
@@ -501,26 +500,26 @@ template <typename P> inline size_t mbtree<P>::size() const {
 }
 
 template <typename P>
-inline PROMISE(bool) mbtree<P>::search(const key_type &k, OID &o, epoch_num e,
+inline bool mbtree<P>::search(const key_type &k, OID &o, epoch_num e,
                               versioned_node_t *search_info) const {
   threadinfo ti(e);
   Masstree::unlocked_tcursor<P> lp(table_, k.data(), k.size());
-  bool found = AWAIT lp.find_unlocked(ti);
+  bool found = lp.find_unlocked(ti);
   if (found) {
     o = lp.value();
   }
   if (search_info) {
     *search_info = versioned_node_t(lp.node(), lp.full_version_value());
   }
-  RETURN found;
+  return found;
 }
 
 template <typename P>
-inline PROMISE(bool) mbtree<P>::insert(const key_type &k, OID o, TXN::xid_context *xc,
+inline bool mbtree<P>::insert(const key_type &k, OID o, TXN::xid_context *xc,
                               value_type *old_oid, insert_info_t *insert_info) {
   threadinfo ti(xc->begin_epoch);
   Masstree::tcursor<P> lp(table_, k.data(), k.size());
-  bool found = AWAIT lp.find_insert(ti);
+  bool found = lp.find_insert(ti);
   if (!found)
     ti.advance_timestamp(lp.node_timestamp());
   if (found && old_oid)
@@ -532,11 +531,11 @@ inline PROMISE(bool) mbtree<P>::insert(const key_type &k, OID o, TXN::xid_contex
     insert_info->new_version = lp.next_full_version_value(1);
   }
   lp.finish(1, ti);
-  RETURN !found;
+  return !found;
 }
 
 template <typename P>
-inline PROMISE(bool) mbtree<P>::insert_if_absent(const key_type &k, OID o,
+inline bool mbtree<P>::insert_if_absent(const key_type &k, OID o,
                                         TXN::xid_context *xc,
                                         insert_info_t *insert_info) {
   // Recovery will give a null xc, use epoch 0 for the memory allocated
@@ -546,7 +545,7 @@ inline PROMISE(bool) mbtree<P>::insert_if_absent(const key_type &k, OID o,
   }
   threadinfo ti(e);
   Masstree::tcursor<P> lp(table_, k.data(), k.size());
-  bool found = AWAIT lp.find_insert(ti);
+  bool found = lp.find_insert(ti);
   if (!found) {
   insert_new:
     found = false;
@@ -569,7 +568,7 @@ inline PROMISE(bool) mbtree<P>::insert_if_absent(const key_type &k, OID o,
       goto insert_new;
   }
   lp.finish(!found, ti);
-  RETURN !found;
+  return !found;
 }
 
 /**
@@ -583,7 +582,7 @@ inline bool mbtree<P>::remove(const key_type &k, TXN::xid_context *xc,
                               dbtuple **old_v) {
   threadinfo ti(xc->begin_epoch);
   Masstree::tcursor<P> lp(table_, k.data(), k.size());
-  bool found = sync_wait_coro(lp.find_locked(ti));
+  bool found = lp.find_locked(ti);
   if (found && old_v)
     *old_v = oidmgr->oid_get_latest_version(tuple_array_, lp.value());
   // XXX. need to look at lp.finish that physically removes records in tree and
@@ -692,67 +691,67 @@ private:
 };
 
 template <typename P>
-inline PROMISE(void)
+inline void
 mbtree<P>::search_range_call(const key_type &lower, const key_type *upper,
                              low_level_search_range_callback &callback,
                              TXN::xid_context *xc) const {
   low_level_search_range_scanner<false> scanner(this, upper, callback);
   threadinfo ti(xc->begin_epoch);
-  AWAIT table_.scan(lcdf::Str(lower.data(), lower.size()), true, scanner, xc, ti);
+  table_.scan(lcdf::Str(lower.data(), lower.size()), true, scanner, xc, ti);
 }
 
 template <typename P>
-inline PROMISE(void)
+inline void
 mbtree<P>::rsearch_range_call(const key_type &upper, const key_type *lower,
                               low_level_search_range_callback &callback,
                               TXN::xid_context *xc) const {
   low_level_search_range_scanner<true> scanner(this, lower, callback);
   threadinfo ti(xc->begin_epoch);
-  AWAIT table_.rscan(lcdf::Str(upper.data(), upper.size()), true, scanner, xc, ti);
+  table_.rscan(lcdf::Str(upper.data(), upper.size()), true, scanner, xc, ti);
 }
 
 template <typename P>
-inline PROMISE(int)
+inline int
 mbtree<P>::search_range_oid(const key_type &lower, const key_type *upper,
                             low_level_search_range_callback &callback,
                             TXN::xid_context *xc) const {
   low_level_search_range_scanner<false> scanner(this, upper, callback);
   threadinfo ti(xc->begin_epoch);
-  RETURN AWAIT table_.scan_oid(lcdf::Str(lower.data(), lower.size()), true, scanner,
+  return table_.scan_oid(lcdf::Str(lower.data(), lower.size()), true, scanner,
                          xc, ti);
 }
 
 template <typename P>
-inline PROMISE(int)
+inline int
 mbtree<P>::rsearch_range_oid(const key_type &upper, const key_type *lower,
                              low_level_search_range_callback &callback,
                              TXN::xid_context *xc) const {
   low_level_search_range_scanner<true> scanner(this, lower, callback);
   threadinfo ti(xc->begin_epoch);
-  RETURN AWAIT table_.rscan_oid(lcdf::Str(upper.data(), upper.size()), true, scanner,
+  return table_.rscan_oid(lcdf::Str(upper.data(), upper.size()), true, scanner,
                           xc, ti);
 }
 
 template <typename P>
 template <typename F>
-inline PROMISE(void) mbtree<P>::search_range(const key_type &lower,
+inline void mbtree<P>::search_range(const key_type &lower,
                                     const key_type *upper, F &callback,
                                     TXN::xid_context *xc) const {
   low_level_search_range_callback_wrapper<F> wrapper(callback);
   low_level_search_range_scanner<false> scanner(this, upper, wrapper);
   threadinfo ti(xc->begin_epoch);
-  AWAIT table_.scan(lcdf::Str(lower.data(), lower.size()), true, scanner, xc, ti);
+  table_.scan(lcdf::Str(lower.data(), lower.size()), true, scanner, xc, ti);
 }
 
 template <typename P>
 template <typename F>
-inline PROMISE(void) mbtree<P>::rsearch_range(const key_type &upper,
+inline void mbtree<P>::rsearch_range(const key_type &upper,
                                      const key_type *lower, F &callback,
                                      TXN::xid_context *xc) const {
   low_level_search_range_callback_wrapper<F> wrapper(callback);
   low_level_search_range_scanner<true> scanner(this, lower, wrapper);
   threadinfo ti(xc->begin_epoch);
-  AWAIT table_.rscan(lcdf::Str(upper.data(), upper.size()), true, scanner, xc, ti);
+  table_.rscan(lcdf::Str(upper.data(), upper.size()), true, scanner, xc, ti);
 }
 
 template <typename P>

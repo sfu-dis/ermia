@@ -8,7 +8,6 @@
 #include "../ermia.h"
 #include "../util.h"
 #include "../dbcore/sm-log-alloc.h"
-#include "../dbcore/sm-coroutine.h"
 
 extern void ycsb_do_test(ermia::Engine *db, int argc, char **argv);
 extern void ycsb_cs_advance_do_test(ermia::Engine *db, int argc, char **argv);
@@ -120,22 +119,16 @@ class bench_worker : public ermia::thread::Runner {
 
   /* For 'normal' workload (r/w on primary, r/o on backups) */
   typedef rc_t (*txn_fn_t)(bench_worker *);
-  typedef std::experimental::coroutine_handle<ermia::dia::generator<bool>::promise_type> SimpleCoroHandle;
-  typedef SimpleCoroHandle (*coro_txn_fn_t)(bench_worker *, uint32_t);
-  typedef ermia::dia::task<rc_t> (*task_fn_t)(bench_worker *, uint32_t, ermia::epoch_num);
   struct workload_desc {
     workload_desc() {}
-    workload_desc(const std::string &name, double frequency, txn_fn_t fn,
-                  coro_txn_fn_t cf=nullptr, task_fn_t tf=nullptr)
-        : name(name), frequency(frequency), fn(fn), task_fn(tf), coro_fn(cf) {
+    workload_desc(const std::string &name, double frequency, txn_fn_t fn)
+        : name(name), frequency(frequency), fn(fn) {
       ALWAYS_ASSERT(frequency > 0.0);
       ALWAYS_ASSERT(frequency <= 1.0);
     }
     std::string name;
     double frequency;
     txn_fn_t fn;
-    task_fn_t task_fn;
-    coro_txn_fn_t coro_fn;
   };
   typedef std::vector<workload_desc> workload_desc_vec;
   virtual workload_desc_vec get_workload() const = 0;
