@@ -199,6 +199,54 @@ void ConcurrentMasstreeIndex::GetRecord(transaction *t, rc_t &rc, const varstr &
   }
 }
 
+void ConcurrentMasstreeIndex::GetRecordMulti(transaction *t, rc_t &rc, const varstr &key,
+        std::vector<varstr> &result_vec, std::vector<OID> *out_oid) {
+    rc = {RC_INVALID};
+    OID dir_oid = INVALID_OID;
+    std::vector<OID> oids;
+    ermia::varstr tmpval;
+    if (!t) {
+        auto e = MM::epoch_enter();
+        rc._val = masstree_.search(key, dir_oid, e, nullptr) ? RC_TRUE : RC_FALSE;
+        MM::epoch_exit(0, e);
+    } else {
+        t->ensure_active();
+        bool found = masstree_.search(key, dir_oid, t->xc->begin_epoch, nullptr);
+        dbtuple *tuple = nullptr;
+        if (found) {
+            LOG_IF(FATAL, config::is_backup_srv()) << "GetRecordMulti is not supportted for backup server";
+            bool ok = oidmgr->oid_get_dir(table_descriptor->GetTupleArray(), dir_oid, oids);
+            ALWAYS_ASSERT(ok);
+            for (auto &o : oids) {
+                tuple = oidmgr->oid_get_version(table_descriptor->GetTupleArray(), o, t->xc);
+                if (!tuple) {
+                    DLOG(WARNING) << "(SKIPPED) Some tuple is empty: OID = " << std::hex << o;
+                    found = false;
+                }
+
+                if (found) {
+                  bool ret = t->DoTupleRead(tuple, &tmpval)._val;
+                  if (!ret) {
+                      DLOG(WARNING) << "(SKIPPED) Cannot do tuple read for OID = " << std::hex << o;
+                      continue;
+                  }
+                  result_vec.push_back(tmpval);
+                } else if (config::phantom_prot) {
+                  // volatile_write(rc._val, DoNodeRead(t, sinfo.first, sinfo.second)._val);
+                } else {
+                    continue;
+                }
+            }
+            volatile_write(rc._val, RC_TRUE);
+            return;
+        } else {
+            volatile_write(rc._val, RC_FALSE);
+            return;
+        }
+    }
+}
+
+
 void ConcurrentMasstreeIndex::PurgeTreeWalker::on_node_begin(
     const typename ConcurrentMasstree::node_opaque_t *n) {
   ASSERT(spec_values.empty());
