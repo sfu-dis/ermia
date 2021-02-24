@@ -96,3 +96,10 @@ $run.sh \
 
 *SSI-specific:*
 `--ssi-read-only-opt`: enable P&G style read-only optimization for SSI.
+
+#### Troubleshooting
+1. If you see this error while compiling ermia:
+```
+/usr/bin/ld: lib/libermia_si.so: undefined reference to 'burt_hash::select_hash(unsigned int)'
+```
+make sure `python2` is installed, and remove the empty `burt-hash.cpp` in `dbcore` directory.
