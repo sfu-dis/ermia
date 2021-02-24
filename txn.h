@@ -80,10 +80,9 @@ public:
 
   inline bool is_read_mostly() { return flags & TXN_FLAG_READ_MOSTLY; }
   inline bool is_read_only() { return flags & TXN_FLAG_READ_ONLY; }
-
-protected:
   inline txn_state state() const { return xc->state; }
 
+protected:
   // the absent set is a mapping from (masstree node -> version_number).
   typedef dense_hash_map<const ConcurrentMasstree::node_opaque_t *, uint64_t > MasstreeAbsentSet;
   MasstreeAbsentSet masstree_absent_set;
