@@ -3,6 +3,8 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <malloc.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -3580,6 +3582,9 @@ class tpce_charge_loader : public bench_loader, public tpce_worker_mixin {
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitCharge();
     bool isLast = pGenerateAndLoad->isLastCharge();
     while (!isLast) {
@@ -3633,6 +3638,9 @@ class tpce_commission_rate_loader : public bench_loader,
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitCommissionRate();
     bool isLast = pGenerateAndLoad->isLastCommissionRate();
     while (!isLast) {
@@ -3678,6 +3686,9 @@ class tpce_exchange_loader : public bench_loader, public tpce_worker_mixin {
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitExchange();
     bool isLast = pGenerateAndLoad->isLastExchange();
     while (!isLast) {
@@ -3727,6 +3738,9 @@ class tpce_industry_loader : public bench_loader, public tpce_worker_mixin {
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitIndustry();
     bool isLast = pGenerateAndLoad->isLastIndustry();
     while (!isLast) {
@@ -3791,6 +3805,9 @@ class tpce_sector_loader : public bench_loader, public tpce_worker_mixin {
   size_t NumOrderLinesPerCustomer() { return RandomNumber(r, 5, 15); }
 
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitSector();
     bool isLast = pGenerateAndLoad->isLastSector();
     while (!isLast) {
@@ -3841,6 +3858,9 @@ class tpce_status_type_loader : public bench_loader, public tpce_worker_mixin {
   size_t NumOrderLinesPerCustomer() { return RandomNumber(r, 5, 15); }
 
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitStatusType();
     bool isLast = pGenerateAndLoad->isLastStatusType();
     while (!isLast) {
@@ -3890,6 +3910,9 @@ class tpce_tax_rate_loader : public bench_loader, public tpce_worker_mixin {
   size_t NumOrderLinesPerCustomer() { return RandomNumber(r, 5, 15); }
 
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitTaxrate();
     bool hasNext;
     do {
@@ -3940,6 +3963,9 @@ class tpce_trade_type_loader : public bench_loader, public tpce_worker_mixin {
   size_t NumOrderLinesPerCustomer() { return RandomNumber(r, 5, 15); }
 
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitTradeType();
     bool isLast = pGenerateAndLoad->isLastTradeType();
     while (!isLast) {
@@ -3989,6 +4015,9 @@ class tpce_zip_code_loader : public bench_loader, public tpce_worker_mixin {
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitZipCode();
     bool hasNext = pGenerateAndLoad->hasNextZipCode();
     while (hasNext) {
@@ -4038,6 +4067,13 @@ class tpce_address_loader : public bench_loader, public tpce_worker_mixin {
  protected:
   virtual void load() {
     pGenerateAndLoad->InitAddress();
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+    uint32_t n_exported_keys = 0;
+    int key_fd = open("tpce_address_keys", O_CREAT | O_TRUNC | O_RDWR, 0666);
+    ALWAYS_ASSERT(key_fd > 0);
+#endif
+
     while (addressBuffer.hasMoreToRead()) {
       addressBuffer.reset();
       bool hasNext;
@@ -4060,13 +4096,25 @@ class tpce_address_loader : public bench_loader, public tpce_worker_mixin {
         v.ad_zc_code = std::string(record->AD_ZC_CODE);
         v.ad_ctry = std::string(record->AD_CTRY);
 
+#ifdef EXPORT_TPCE_INT64_KEYS
+        int nbytes = write(key_fd, &k.ad_id, sizeof(k.ad_id));
+        ALWAYS_ASSERT(nbytes == sizeof(k.ad_id));
+        n_exported_keys++;
+#else
         ermia::transaction *txn = db->NewTransaction(0, arena, txn_buf());
         TryVerifyStrict(tbl_address(1)->Insert(txn, Encode(str(sizeof(k)), k),
                                                  Encode(str(sizeof(v)), v)));
         TryVerifyStrict(db->Commit(txn));
+#endif
         arena.reset();
       }
     }
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+    close(key_fd);
+    std::cerr << "Address: exported " << n_exported_keys << " keys" << std::endl;
+#endif
+
     pGenerateAndLoad->ReleaseAddress();
     addressBuffer.release();
   }
@@ -4092,6 +4140,13 @@ class tpce_customer_loader : public bench_loader, public tpce_worker_mixin {
  protected:
   virtual void load() {
     pGenerateAndLoad->InitCustomer();
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+    uint32_t n_exported_keys = 0;
+    int key_fd = open("tpce_customers_keys", O_CREAT | O_TRUNC | O_RDWR, 0666);
+    ALWAYS_ASSERT(key_fd > 0);
+#endif
+
     while (customerBuffer.hasMoreToRead()) {
       customerBuffer.reset();
       bool hasNext;
@@ -4109,6 +4164,13 @@ class tpce_customer_loader : public bench_loader, public tpce_worker_mixin {
         customers::value v;
 
         k.c_id = record->C_ID;
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+        int nbytes = write(key_fd, &k.c_id, sizeof(k.c_id));
+        ALWAYS_ASSERT(nbytes == sizeof(k.c_id));
+        n_exported_keys++;
+#else
+
         v.c_tax_id = std::string(record->C_TAX_ID);
         v.c_st_id = std::string(record->C_ST_ID);
         v.c_l_name = std::string(record->C_L_NAME);
@@ -4145,9 +4207,16 @@ class tpce_customer_loader : public bench_loader, public tpce_worker_mixin {
         TryVerifyStrict(tbl_c_tax_id_index(1)->Insert(
             txn, Encode(str(sizeof(k_idx_tax_id)), k_idx_tax_id), c_oid));
         TryVerifyStrict(db->Commit(txn));
+#endif
         arena.reset();
       }
     }
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+    close(key_fd);
+    std::cerr << "Customers: exported " << n_exported_keys << " keys" << std::endl;
+#endif
+
     pGenerateAndLoad->ReleaseCustomer();
     customerBuffer.release();
   }
@@ -4173,6 +4242,13 @@ class tpce_ca_and_ap_loader : public bench_loader, public tpce_worker_mixin {
  protected:
   virtual void load() {
     pGenerateAndLoad->InitCustomerAccountAndAccountPermission();
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+    uint32_t n_exported_keys = 0;
+    int key_fd = open("tpce_customer_account_keys", O_CREAT | O_TRUNC | O_RDWR, 0666);
+    ALWAYS_ASSERT(key_fd > 0);
+#endif
+
     while (customerAccountBuffer.hasMoreToRead()) {
       customerAccountBuffer.reset();
       accountPermissionBuffer.reset();
@@ -4202,6 +4278,13 @@ class tpce_ca_and_ap_loader : public bench_loader, public tpce_worker_mixin {
         if (unlikely(record->CA_ID < min_ca_id)) min_ca_id = record->CA_ID;
 
         k.ca_id = record->CA_ID;
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+        int nbytes = write(key_fd, &k.ca_id, sizeof(k.ca_id));
+        ALWAYS_ASSERT(nbytes == sizeof(k.ca_id));
+        n_exported_keys++;
+#else
+
         v.ca_b_id = record->CA_B_ID;
         v.ca_c_id = record->CA_C_ID;
         v.ca_name = std::string(record->CA_NAME);
@@ -4219,6 +4302,7 @@ class tpce_ca_and_ap_loader : public bench_loader, public tpce_worker_mixin {
         TryVerifyStrict(tbl_ca_id_index(1)->Insert(
             txn, Encode(str(sizeof(k_idx1)), k_idx1), ca_oid));
         TryVerifyStrict(db->Commit(txn));
+#endif
         arena.reset();
       }
       rows = customerAccountBuffer.getSize();
@@ -4243,6 +4327,11 @@ class tpce_ca_and_ap_loader : public bench_loader, public tpce_worker_mixin {
     pGenerateAndLoad->ReleaseCustomerAccountAndAccountPermission();
     customerAccountBuffer.release();
     accountPermissionBuffer.release();
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+    close(key_fd);
+    std::cerr << "CustomerAccount: exported " << n_exported_keys << " keys" << std::endl;
+#endif
   }
 
  private:
@@ -4267,6 +4356,9 @@ class tpce_customer_taxrate_loader : public bench_loader,
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitCustomerTaxrate();
     while (customerTaxrateBuffer.hasMoreToRead()) {
       customerTaxrateBuffer.reset();
@@ -4323,6 +4415,9 @@ class tpce_wl_and_wi_loader : public bench_loader, public tpce_worker_mixin {
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitWatchListAndWatchItem();
     while (watchListBuffer.hasMoreToRead()) {
       watchItemBuffer.reset();
@@ -4398,6 +4493,11 @@ class tpce_company_loader : public bench_loader, public tpce_worker_mixin {
  protected:
   virtual void load() {
     pGenerateAndLoad->InitCompany();
+#ifdef EXPORT_TPCE_INT64_KEYS
+    uint32_t n_exported_keys = 0;
+    int key_fd = open("tpce_company_keys", O_CREAT | O_TRUNC | O_RDWR, 0666);
+    ALWAYS_ASSERT(key_fd > 0);
+#endif
     while (companyBuffer.hasMoreToRead()) {
       companyBuffer.reset();
       bool hasNext;
@@ -4417,6 +4517,13 @@ class tpce_company_loader : public bench_loader, public tpce_worker_mixin {
         co_in_id_index::key k_idx2;
 
         k.co_id = record->CO_ID;
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+        int nbytes = write(key_fd, &k.co_id, sizeof(k.co_id));
+        ALWAYS_ASSERT(nbytes == sizeof(k.co_id));
+        n_exported_keys++;
+#else
+
         v.co_st_id = std::string(record->CO_ST_ID);
         v.co_name = std::string(record->CO_NAME);
         v.co_in_id = std::string(record->CO_IN_ID);
@@ -4440,9 +4547,16 @@ class tpce_company_loader : public bench_loader, public tpce_worker_mixin {
         TryVerifyStrict(tbl_co_in_id_index(1)->Insert(
             txn, Encode(str(sizeof(k_idx2)), k_idx2), c_oid));
         TryVerifyStrict(db->Commit(txn));
+#endif
         arena.reset();
       }
     }
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+    close(key_fd);
+    std::cerr << "Company: exported " << n_exported_keys << " keys" << std::endl;
+#endif
+
     pGenerateAndLoad->ReleaseCompany();
     companyBuffer.release();
   }
@@ -4469,6 +4583,9 @@ class tpce_company_competitor_loader : public bench_loader,
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitCompanyCompetitor();
     while (companyCompetitorBuffer.hasMoreToRead()) {
       companyCompetitorBuffer.reset();
@@ -4524,6 +4641,9 @@ class tpce_daily_market_loader : public bench_loader, public tpce_worker_mixin {
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitDailyMarket();
     while (dailyMarketBuffer.hasMoreToRead()) {
       dailyMarketBuffer.reset();
@@ -4579,6 +4699,9 @@ class tpce_financial_loader : public bench_loader, public tpce_worker_mixin {
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitFinancial();
     while (financialBuffer.hasMoreToRead()) {
       financialBuffer.reset();
@@ -4643,6 +4766,9 @@ class tpce_last_trade_loader : public bench_loader, public tpce_worker_mixin {
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     pGenerateAndLoad->InitLastTrade();
     while (lastTradeBuffer.hasMoreToRead()) {
       lastTradeBuffer.reset();
@@ -4698,6 +4824,11 @@ class tpce_ni_and_nx_loader : public bench_loader, public tpce_worker_mixin {
  protected:
   virtual void load() {
     pGenerateAndLoad->InitNewsItemAndNewsXRef();
+#ifdef EXPORT_TPCE_INT64_KEYS
+    uint32_t n_exported_keys = 0;
+    int key_fd = open("tpce_news_item_keys", O_CREAT | O_TRUNC | O_RDWR, 0666);
+    ALWAYS_ASSERT(key_fd > 0);
+#endif
     while (newsItemBuffer.hasMoreToRead()) {
       newsItemBuffer.reset();
       newsXRefBuffer.reset();
@@ -4737,6 +4868,12 @@ class tpce_ni_and_nx_loader : public bench_loader, public tpce_worker_mixin {
 
         k.ni_id = record->NI_ID;
 
+#ifdef EXPORT_TPCE_INT64_KEYS
+        int nbytes = write(key_fd, &k.ni_id, sizeof(k.ni_id));
+        ALWAYS_ASSERT(nbytes == sizeof(k.ni_id));
+        n_exported_keys++;
+#else
+
         v.ni_headline = std::string(record->NI_HEADLINE);
         v.ni_summary = std::string(record->NI_SUMMARY);
         v.ni_item = std::string(record->NI_ITEM);
@@ -4748,12 +4885,17 @@ class tpce_ni_and_nx_loader : public bench_loader, public tpce_worker_mixin {
         TryVerifyStrict(tbl_news_item(1)->Insert(
             txn, Encode(str(sizeof(k)), k), Encode(str(sizeof(v)), v)));
         TryVerifyStrict(db->Commit(txn));
+#endif
         arena.reset();
       }
     }
     pGenerateAndLoad->ReleaseNewsItemAndNewsXRef();
     newsItemBuffer.release();
     newsXRefBuffer.release();
+#ifdef EXPORT_TPCE_INT64_KEYS
+    close(key_fd);
+    std::cerr << "NewsItem: exported " << n_exported_keys << " keys" << std::endl;
+#endif
   }
 
  private:
@@ -4776,6 +4918,10 @@ class tpce_security_loader : public bench_loader, public tpce_worker_mixin {
 
  protected:
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
+
     pGenerateAndLoad->InitSecurity();
     while (securityBuffer.hasMoreToRead()) {
       securityBuffer.reset();
@@ -4848,7 +4994,36 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
   }
 
  protected:
+#ifdef EXPORT_TPCE_INT64_KEYS
+    uint32_t n_exported_trade_keys;
+    uint32_t n_exported_settlement_keys;
+    uint32_t n_exported_cash_transaction_keys;
+    uint32_t n_exported_broker_keys;
+    int trade_key_fd;
+    int settlement_key_fd;
+    int cash_transaction_key_fd;
+    int broker_key_fd;
+#endif
+
   virtual void load() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    n_exported_trade_keys = 0;
+    trade_key_fd = open("tpce_trade_keys", O_CREAT | O_TRUNC | O_RDWR, 0666);
+    ALWAYS_ASSERT(trade_key_fd > 0);
+
+    n_exported_settlement_keys = 0;
+    settlement_key_fd = open("tpce_settlement_keys", O_CREAT | O_TRUNC | O_RDWR, 0666);
+    ALWAYS_ASSERT(settlement_key_fd > 0);
+
+    n_exported_cash_transaction_keys = 0;
+    cash_transaction_key_fd = open("tpce_cash_transaction_keys", O_CREAT | O_TRUNC | O_RDWR, 0666);
+    ALWAYS_ASSERT(cash_transaction_key_fd > 0);
+
+    n_exported_broker_keys = 0;
+    broker_key_fd = open("broker_keys", O_CREAT | O_TRUNC | O_RDWR, 0666);
+    ALWAYS_ASSERT(broker_key_fd > 0);
+#endif
+
     pGenerateAndLoad->InitHoldingAndTrade();
     do {
       populate_unit_trade();
@@ -4864,6 +5039,12 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
       brokerBuffer.newLoadUnit();
       holdingSummaryBuffer.newLoadUnit();
       holdingBuffer.newLoadUnit();
+
+    std::cerr << "In progress - Trade: exported " << n_exported_trade_keys << " keys" << std::endl;
+    std::cerr << "In progress - Settlement: exported " << n_exported_settlement_keys << " keys" << std::endl;
+    std::cerr << "In progress - CashTransaction: exported " << n_exported_cash_transaction_keys << " keys" << std::endl;
+    std::cerr << "In progress - Broker: exported " << n_exported_broker_keys << " keys" << std::endl;
+
     } while (pGenerateAndLoad->hasNextLoadUnit());
 
     pGenerateAndLoad->ReleaseHoldingAndTrade();
@@ -4875,6 +5056,17 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
     brokerBuffer.release();
     holdingSummaryBuffer.release();
     holdingBuffer.release();
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+    close(trade_key_fd);
+    close(settlement_key_fd);
+    close(cash_transaction_key_fd);
+    std::cerr << "Trade: exported " << n_exported_trade_keys << " keys" << std::endl;
+    std::cerr << "Settlement: exported " << n_exported_settlement_keys << " keys" << std::endl;
+    std::cerr << "CashTransaction: exported " << n_exported_cash_transaction_keys << " keys" << std::endl;
+#endif
+
+
   }
 
  private:
@@ -4921,6 +5113,13 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
         trade::value v;
 
         k.t_id = record->T_ID;
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+        int nbytes = write(trade_key_fd, &k.t_id, sizeof(k.t_id));
+        ALWAYS_ASSERT(nbytes == sizeof(k.t_id));
+        n_exported_trade_keys++;
+#else
+
         if (likely(record->T_ID > lastTradeId)) lastTradeId = record->T_ID;
         v.t_dts = record->T_DTS.GetDate();
         v.t_st_id = std::string(record->T_ST_ID);
@@ -4956,9 +5155,11 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
         TryVerifyStrict(tbl_t_s_symb_index(1)->Insert(
             txn, Encode(str(sizeof(k_idx2)), k_idx2), t_oid));
         TryVerifyStrict(db->Commit(txn));
+#endif
         arena.reset();
       }
 
+#ifndef EXPORT_TPCE_INT64_KEYS
       rows = tradeHistoryBuffer.getSize();
       for (int i = 0; i < rows; i++) {
         PTRADE_HISTORY_ROW record = tradeHistoryBuffer.get(i);
@@ -4975,6 +5176,7 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
         TryVerifyStrict(db->Commit(txn));
         arena.reset();
       }
+#endif
 
       rows = settlementBuffer.getSize();
       for (int i = 0; i < rows; i++) {
@@ -4984,6 +5186,11 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
 
         k.se_t_id = record->SE_T_ID;
 
+#ifdef EXPORT_TPCE_INT64_KEYS
+        int nbytes = write(settlement_key_fd, &k.se_t_id, sizeof(k.se_t_id));
+        ALWAYS_ASSERT(nbytes == sizeof(k.se_t_id));
+        n_exported_settlement_keys++;
+#else
         v.se_cash_type = std::string(record->SE_CASH_TYPE);
         v.se_cash_due_date = record->SE_CASH_DUE_DATE.GetDate();
         v.se_amt = record->SE_AMT;
@@ -4992,6 +5199,7 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
         TryVerifyStrict(tbl_settlement(1)->Insert(
             txn, Encode(str(sizeof(k)), k), Encode(str(sizeof(v)), v)));
         TryVerifyStrict(db->Commit(txn));
+#endif
         arena.reset();
       }
 
@@ -5003,6 +5211,12 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
 
         k.ct_t_id = record->CT_T_ID;
 
+#ifdef EXPORT_TPCE_INT64_KEYS
+        int nbytes = write(cash_transaction_key_fd, &k.ct_t_id, sizeof(k.ct_t_id));
+        ALWAYS_ASSERT(nbytes == sizeof(k.ct_t_id));
+        n_exported_cash_transaction_keys++;
+#else
+
         v.ct_dts = record->CT_DTS.GetDate();
         v.ct_amt = record->CT_AMT;
         v.ct_name = std::string(record->CT_NAME);
@@ -5011,9 +5225,11 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
         TryVerifyStrict(tbl_cash_transaction(1)->Insert(
             txn, Encode(str(sizeof(k)), k), Encode(str(sizeof(v)), v)));
         TryVerifyStrict(db->Commit(txn));
+#endif
         arena.reset();
       }
 
+#ifndef EXPORT_TPCE_INT64_KEYS
       rows = holdingHistoryBuffer.getSize();
       for (int i = 0; i < rows; i++) {
         PHOLDING_HISTORY_ROW record = holdingHistoryBuffer.get(i);
@@ -5031,6 +5247,8 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
         TryVerifyStrict(db->Commit(txn));
         arena.reset();
       }
+#endif
+
     }
   }
 
@@ -5051,6 +5269,13 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
         broker::value v;
 
         k.b_id = record->B_ID;
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+        int nbytes = write(broker_key_fd, &k.b_id, sizeof(k.b_id));
+        ALWAYS_ASSERT(nbytes == sizeof(k.b_id));
+        n_exported_broker_keys++;
+#else
+
         v.b_st_id = std::string(record->B_ST_ID);
         v.b_name = std::string(record->B_NAME);
         v.b_num_trades = record->B_NUM_TRADES;
@@ -5067,12 +5292,16 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
         TryVerifyStrict(tbl_b_name_index(1)->Insert(
             txn, Encode(str(sizeof(k_idx)), k_idx), b_oid));
         TryVerifyStrict(db->Commit(txn));
+#endif
         arena.reset();
       }
     }
   }
 
   void populate_holding_summary() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
     while (holdingSummaryBuffer.hasMoreToRead()) {
       holdingSummaryBuffer.reset();
       bool hasNext;
@@ -5102,6 +5331,10 @@ class tpce_growing_loader : public bench_loader, public tpce_worker_mixin {
   }
 
   void populate_holding() {
+#ifdef EXPORT_TPCE_INT64_KEYS
+    return;
+#endif
+
     while (holdingBuffer.hasMoreToRead()) {
       holdingBuffer.reset();
       bool hasNext;
@@ -5427,6 +5660,10 @@ void tpce_do_test(ermia::Engine *db, int argc, char **argv) {
     cerr << "  customers            : " << cust_str << endl;
     cerr << "  long query scan range: " << long_query_scan_range << "%" << endl;
   }
+
+#ifdef EXPORT_TPCE_INT64_KEYS
+  cerr << "\n!!! WARNING: EXPORT_TPCE_INT64_KEYS defined - will only dump keys. Benchmarks will not run!" << std::endl;
+#endif
 
   tpce_bench_runner r(db);
   r.run();
