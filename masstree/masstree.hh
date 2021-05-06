@@ -51,6 +51,7 @@ template <typename P> class key;
 template <typename P> class basic_table;
 template <typename P> class unlocked_tcursor;
 template <typename P> class tcursor;
+template <typename P> struct scan_info;
 
 template <typename P> class basic_table {
 public:
@@ -88,6 +89,12 @@ public:
 
   template <typename F> inline int modify(Str key, F &f, threadinfo &ti);
   template <typename F> inline int modify_insert(Str key, F &f, threadinfo &ti);
+
+  template <bool IsNext, typename H, typename F>
+  bool scan_init_or_next_value(H helper, F &scanner,
+                                       ermia::TXN::xid_context *xc,
+                                       threadinfo &ti,
+                                       scan_info<P> *si) const;
 
   inline void print(FILE *f = 0, int indent = 0) const;
   inline void set_tuple_array(ermia::oid_array *oa) { tuple_array_ = oa; }

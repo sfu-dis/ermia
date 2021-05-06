@@ -70,6 +70,36 @@ private:
   template <typename PX> friend class basic_table;
 };
 
+template <typename P>
+struct scan_info {
+  typedef scanstackelt<P> mystack_type;
+  typedef typename P::ikey_type ikey_type;
+  typedef node_base<P> node_type;
+  typedef leaf<P> leaf_type;
+  typedef typename node_type::key_type key_type;
+  typedef typename node_type::leaf_type::leafvalue_type leafvalue_type;
+  union {
+    ikey_type
+        x[(MASSTREE_MAXKEYLEN + sizeof(ikey_type) - 1) / sizeof(ikey_type)];
+    char s[MASSTREE_MAXKEYLEN];
+  } keybuf;
+  key_type ka;
+  int state;
+
+  mystack_type stack[(MASSTREE_MAXKEYLEN + sizeof(ikey_type) - 1) / sizeof(ikey_type)];
+  int stackpos = 0;
+  leafvalue_type entry;
+
+  scan_info() {}
+  scan_info(const basic_table<P> *bt, Str firstkey) {
+      masstree_precondition(firstkey.len <= (int)sizeof(keybuf));
+      memcpy(keybuf.s, firstkey.s, firstkey.len);
+      ka = key_type(keybuf.s, firstkey.len);
+      stack[0].root_ = bt->get_root();
+      entry = leafvalue_type::make_empty();
+  }
+};
+
 struct forward_scan_helper {
   bool initial_ksuf_match(int ksuf_compare, bool emit_equal) const {
     return ksuf_compare > 0 || (ksuf_compare == 0 && emit_equal);
@@ -275,6 +305,56 @@ changed:
   perm_ = n_->permutation();
   ki_ = helper.lower(ka, this);
   return scan_find_next;
+}
+
+template <typename P>
+template <bool IsNext, typename H, typename F>
+bool basic_table<P>::scan_init_or_next_value(H helper, F &scanner,
+                                                      ermia::TXN::xid_context *xc,
+                                                      threadinfo &ti,
+                                                      scan_info<P> *si) const {
+  if (IsNext) {
+    si->stack[si->stackpos].ki_ = helper.next(si->stack[si->stackpos].ki_);
+    si->state = si->stack[si->stackpos].find_next(helper, si->ka, si->entry);
+  }
+  while (1) {
+    switch (si->state) {
+    case scan_info<P>::mystack_type::scan_emit: { 
+      if (!scanner.visit_value_no_callback(si->ka)) {
+        return false;
+      }
+      return true;
+    } break;
+
+    case scan_info<P>::mystack_type::scan_find_next:
+    find_next:
+      si->state = si->stack[si->stackpos].find_next(helper, si->ka, si->entry);
+      if (si->state != scan_info<P>::mystack_type::scan_up)
+        scanner.visit_leaf(si->stack[si->stackpos], si->ka, ti);
+      break;
+
+    case scan_info<P>::mystack_type::scan_up:
+      do {
+        if (--si->stackpos < 0)
+          return false;
+        si->ka.unshift();
+        si->stack[si->stackpos].ki_ = helper.next(si->stack[si->stackpos].ki_);
+      } while (unlikely(si->ka.empty()));
+      goto find_next;
+
+    case scan_info<P>::mystack_type::scan_down:
+      helper.shift_clear(si->ka);
+      ++si->stackpos;
+      goto retry;
+
+    case scan_info<P>::mystack_type::scan_retry:
+    retry:
+      si->state = si->stack[si->stackpos].find_retry(helper, si->ka, ti);
+      break;
+    }
+  }
+
+  return true;
 }
 
 template <typename P>
