@@ -417,40 +417,38 @@ public:
   template <bool Reverse> class low_level_iterator_scanner;
   template <typename F> class low_level_search_range_callback_wrapper;
 
-  template <bool IsReverse>
+template <bool IsReverse>
   class ScanIterator {
    public:
     Masstree::scan_info<masstree_params> sinfo_;
     low_level_iterator_scanner<IsReverse> scanner_;
     TXN::xid_context *xc_;
-  
+
     using scan_helper_t =
         typename std::conditional<IsReverse, Masstree::reverse_scan_helper,
                                   Masstree::forward_scan_helper>::type;
     scan_helper_t helper_;
-  
-    ermia::dbtuple *tuple_;
-  
+
    private:
+    ermia::dbtuple *tuple_;
     mbtree<P> *btr_;
-  
     int scancount_;
-  
-    OID value_;
-  
+
   public:
    ScanIterator(TXN::xid_context *xc, mbtree<P> *btr, const key_type &lower,
                 const key_type *upper)
        : sinfo_(btr->get_table(), lower),
          scanner_(btr, upper),
          xc_(xc),
-         tuple_(nullptr),
          btr_(btr) {}
    int count() const { return scancount_; }
-  
-   ermia::dbtuple *tuple() const { return tuple_; }
+
+   OID value() const { return sinfo_.entry.value(); }
    Masstree::Str key() { return sinfo_.ka.full_string(); }
-  
+
+   oid_array *tuple_array() const { return btr_->tuple_array_; }
+   oid_array *pdest_array() const { return btr_->pdest_array_; }
+
    static ScanIterator<IsReverse> factory(
           mbtree<P> *mbtree,
           ermia::TXN::xid_context *xc,
@@ -459,10 +457,10 @@ public:
           bool emit_firstkey=true) {
      ScanIterator<IsReverse> scan_iterator(xc, mbtree, start_key, end_key);
      threadinfo ti(xc->begin_epoch);
-  
+
      auto &si = scan_iterator.sinfo_;
      auto &scanner = scan_iterator.scanner_;
-  
+
      while (1) {
        si.state = si.stack[si.stackpos].find_initial(scan_iterator.helper_, si.ka, emit_firstkey, si.entry, ti);
        scanner.visit_leaf(si.stack[si.stackpos], si.ka, ti);
@@ -471,37 +469,45 @@ public:
        si.ka.shift();
        ++si.stackpos;
      }
-  
+
      return scan_iterator;
    }
-  
-  
+
+   // Caller need to free the memory
+   static ScanIterator<IsReverse> *session_factory(
+          mbtree<P> *mbtree,
+          ermia::TXN::xid_context *xc,
+          const ermia::varstr &start_key,
+          const ermia::varstr *end_key,
+          bool emit_firstkey=true) {
+     ScanIterator<IsReverse> *scan_iterator_ptr = new ScanIterator(xc, mbtree, start_key, end_key);
+     ScanIterator<IsReverse> scan_iterator = *scan_iterator_ptr;
+     threadinfo ti(xc->begin_epoch);
+
+     auto &si = scan_iterator.sinfo_;
+     auto &scanner = scan_iterator.scanner_;
+
+     while (1) {
+       si.state = si.stack[si.stackpos].find_initial(scan_iterator.helper_, si.ka, emit_firstkey, si.entry, ti);
+       scanner.visit_leaf(si.stack[si.stackpos], si.ka, ti);
+       if (si.state != Masstree::scan_info<P>::mystack_type::scan_down)
+         break;
+       si.ka.shift();
+       ++si.stackpos;
+     }
+
+     return scan_iterator_ptr;
+   }
+
    template <bool IsNext>
    bool init_or_next() {
        threadinfo ti(xc_->begin_epoch);
-      // See if the value is visible
-      bool more = btr_->get_table()->template scan_init_or_next_value<IsNext>(
-              helper_, scanner_, xc_, ti, &sinfo_);
-      if (more) {
-        scancount_++;
-        // scan_next_value advance the ka, but does not advance sinfo_.entry
-        ermia::OID oid = sinfo_.entry.value();
-        // Caller responsible for the final vetting using
-        // transaction::DoTupleRead
-        if (unlikely(ermia::config::is_backup_srv())) {
-          tuple_ = ermia::oidmgr->BackupGetVersion(btr_->tuple_array_, btr_->pdest_array_, oid, xc_);
-        } else {
-          tuple_ = ermia::oidmgr->oid_get_version(btr_->tuple_array_, oid, xc_);
-        }
-      } else {
-        tuple_ = nullptr;
-      }
-      return more;
+       return btr_->get_table()->template scan_init_or_next_value<IsNext>(
+           helper_, scanner_, xc_, ti, &sinfo_);
     }
   };
 
 };
-
 
 template <typename P>
 typename mbtree<P>::leaf_type *

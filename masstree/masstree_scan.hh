@@ -41,7 +41,6 @@ public:
     return n.n_->compare_key(k, p);
   }
 
-private:
   node_base<P> *root_;
   leaf<P> *n_;
   nodeversion_type v_;

@@ -99,11 +99,13 @@ public:
   inline void print(FILE *f = 0, int indent = 0) const;
   inline void set_tuple_array(ermia::oid_array *oa) { tuple_array_ = oa; }
   inline void set_pdest_array(ermia::oid_array *oa) { pdest_array_ = oa; }
+  inline node_type *get_root() const { return root_; }
 
-private:
+
   node_type *root_;
   ermia::oid_array *tuple_array_;
   ermia::oid_array *pdest_array_;
+
 
   template <typename H, typename F>
   int scan(H helper, Str firstkey, bool matchfirst, F &scanner,
