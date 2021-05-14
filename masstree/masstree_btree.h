@@ -481,7 +481,7 @@ template <bool IsReverse>
           const ermia::varstr *end_key,
           bool emit_firstkey=true) {
      ScanIterator<IsReverse> *scan_iterator_ptr = new ScanIterator(xc, mbtree, start_key, end_key);
-     ScanIterator<IsReverse> scan_iterator = *scan_iterator_ptr;
+     ScanIterator<IsReverse> &scan_iterator = *scan_iterator_ptr;
      threadinfo ti(xc->begin_epoch);
 
      auto &si = scan_iterator.sinfo_;
