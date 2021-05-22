@@ -50,6 +50,7 @@ struct write_set_t {
 
 class transaction {
   friend class ConcurrentMasstreeIndex;
+  friend class DirIterator;
   friend struct sm_oid_mgr;
 
 public:

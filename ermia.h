@@ -3,6 +3,7 @@
 #include "../dbcore/sm-log-recover-impl.h"
 #include "txn.h"
 #include "../benchmarks/record/encoder.h"
+#include "../dbcore/sm-dir-it.h"
 #include "ermia_internal.h"
 
 namespace ermia {
@@ -148,6 +149,7 @@ public:
                          OID *out_oid = nullptr) override;
   virtual void GetRecordMulti(transaction *t, rc_t &rc, const varstr &key, std::vector<varstr> &value,
                               std::vector<OID> *oids = nullptr);
+  virtual DirIterator *GetRecordMultiIt(transaction *t, rc_t &rc, const varstr &key);
 
   rc_t UpdateRecord(transaction *t, const varstr &key, varstr &value) override;
   rc_t InsertRecord(transaction *t, const varstr &key, varstr &value, OID *out_oid = nullptr) override;

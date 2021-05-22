@@ -2,6 +2,7 @@
 #include "dbcore/sm-chkpt.h"
 #include "dbcore/sm-cmd-log.h"
 #include "dbcore/sm-rep.h"
+#include "dbcore/sm-dir-it.h"
 
 #include "ermia.h"
 #include "txn.h"
@@ -197,6 +198,35 @@ void ConcurrentMasstreeIndex::GetRecord(transaction *t, rc_t &rc, const varstr &
   if (out_oid) {
     *out_oid = oid;
   }
+}
+
+DirIterator *ConcurrentMasstreeIndex::GetRecordMultiIt(transaction *t, rc_t &rc, const varstr &key) {
+    rc = {RC_INVALID};
+    OID dir_oid = INVALID_OID;
+    std::vector<OID> oids;
+    ermia::varstr tmpval;
+    auto dir_it = new DirIterator(t, table_descriptor);
+    if (!t) {
+        auto e = MM::epoch_enter();
+        rc._val = masstree_.search(key, dir_oid, e, nullptr) ? RC_TRUE : RC_FALSE;
+        MM::epoch_exit(0, e);
+    } else {
+        t->ensure_active();
+        bool found = masstree_.search(key, dir_oid, t->xc->begin_epoch, nullptr);
+        dbtuple *tuple = nullptr;
+        if (found) {
+            LOG_IF(FATAL, config::is_backup_srv()) << "GetRecordMulti is not supportted for backup server";
+            bool ok = oidmgr->oid_get_dir(table_descriptor->GetTupleArray(), dir_oid, *(dir_it->_ptr));
+            ALWAYS_ASSERT(ok);
+            volatile_write(rc._val, RC_TRUE);
+            return dir_it;
+        } else {
+            volatile_write(rc._val, RC_FALSE);
+            delete dir_it;
+            return nullptr;
+        }
+    }
+ 
 }
 
 void ConcurrentMasstreeIndex::GetRecordMulti(transaction *t, rc_t &rc, const varstr &key,
