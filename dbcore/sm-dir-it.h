@@ -45,6 +45,7 @@ redo:
             idx += 1;
             goto redo;
         }
+	idx += 1;
         return tmpval;
     } else if (config::phantom_prot) {
         // volatile_write(rc._val, DoNodeRead(t, sinfo.first, sinfo.second)._val);
