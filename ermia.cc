@@ -82,7 +82,7 @@ void Engine::LogIndexCreation(bool primary, FID table_fid, FID index_fid, const 
 void Engine::CreateIndex(const char *table_name, const std::string &index_name, bool is_primary, bool is_unique) {
   auto *td = TableDescriptor::Get(table_name);
   ALWAYS_ASSERT(td);
-  auto *index = new ConcurrentMasstreeIndex(table_name, is_primary);
+  auto *index = new ConcurrentMasstreeIndex(table_name, index_name, is_primary);
   if (is_primary) {
     td->SetPrimaryIndex(index, index_name);
     index->SetUnique(true);
@@ -338,6 +338,26 @@ bool ConcurrentMasstreeIndex::InsertOID(transaction *t, const varstr &key, OID o
 
 static inline OID *find_empty_dir_entry(transaction *t, OID *chunk, ermia::TableDescriptor *td);
 
+inline int printhex(const varstr &key) {
+  auto data = key.data();
+  auto len = key.size();
+  int cnt = 0;
+  for (int i = 0; i < len; i++) {
+    printf("%x%x %c ", ((unsigned int)data[i] & 0xF0) >> 4,
+           (unsigned int)data[i] & 0x0F, data[i]);
+    cnt++;
+    if (cnt == 8) {
+      printf(" ");
+    }
+    if (cnt == 16) {
+      printf("\n");
+      cnt = 0;
+    }
+  }
+  if (len % 16) printf("\n");
+  return 0;
+}
+
 /* OID_DIR Object structure:
  * OID_DIR is an array that stores the OID to the real data, the last entry for in the OID_DIR object
  * Stores the OID to another OID_DIR Object (sub-dir), so that the OID_DIR size can be very large (2^32 - 1)
@@ -348,6 +368,7 @@ bool ConcurrentMasstreeIndex::InsertToDir(transaction *t, const varstr &key, OID
   ALWAYS_ASSERT(!this->IsUnique());
   t->ensure_active();
   OID dir_oid = INVALID_OID;
+retry:
   auto found = masstree_.search(key, dir_oid, t->xc->begin_epoch);
   auto td = this->GetTableDescriptor();
   ALWAYS_ASSERT(td);
@@ -367,10 +388,16 @@ bool ConcurrentMasstreeIndex::InsertToDir(transaction *t, const varstr &key, OID
         oidmgr->oid_put_new(td->GetTupleFid(), dir_oid, dirp);
         DLOG(INFO) << "Insert the oid dir fat pointer addr: " << std::hex << dirp._ptr << ", Original addr: " << std::hex << oid_dir;
       }
-      bool ok = masstree_.insert(key, dir_oid, t->xc);
-      ALWAYS_ASSERT(ok);
-      return true;
+      bool ok = masstree_.insert_if_absent(key, dir_oid, t->xc);
+      if (ok) {
+        return true;
+      }
+      oidmgr->free_oid(td->GetTupleFid(), dir_oid);
+      goto retry;
   }
+  // FIXME(jianqiuz): Currently using MCS_LOCK, but
+  // Maybe we can utilize the auxilary array and do a mutex?
+  CRITICAL_SECTION(cs, lock);
   auto dirp = oidmgr->oid_get(td->GetTupleFid(), dir_oid);
   DLOG(INFO) << "Get the oid dir pointer addr: " << std::hex << dirp.offset();
   ALWAYS_ASSERT(dirp._ptr);

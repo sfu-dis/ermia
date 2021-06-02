@@ -80,8 +80,11 @@ public:
 class ConcurrentMasstreeIndex : public OrderedIndex {
   friend struct sm_log_recover_impl;
   friend class sm_chkpt_mgr;
+public:
+  const std::string name;
 
 private:
+  mcs_lock lock;
   ConcurrentMasstree masstree_;
 
   struct SearchRangeCallback {
@@ -140,6 +143,7 @@ private:
 
 public:
   ConcurrentMasstreeIndex(const char *table_name, bool primary) : OrderedIndex(table_name, primary) {}
+  ConcurrentMasstreeIndex(const char *table_name, const std::string &index_name, bool primary) : OrderedIndex(table_name, primary), name(index_name) {}
 
   ConcurrentMasstree &GetMasstree() { return masstree_; }
 
