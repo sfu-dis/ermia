@@ -85,6 +85,7 @@ public:
 
 private:
   mcs_lock lock;
+  std::mutex latch;
   ConcurrentMasstree masstree_;
 
   struct SearchRangeCallback {

@@ -397,11 +397,11 @@ retry:
   }
   // FIXME(jianqiuz): Currently using MCS_LOCK, but
   // Maybe we can utilize the auxilary array and do a mutex?
-  CRITICAL_SECTION(cs, lock);
   auto dirp = oidmgr->oid_get(td->GetTupleFid(), dir_oid);
   DLOG(INFO) << "Get the oid dir pointer addr: " << std::hex << dirp.offset();
   ALWAYS_ASSERT(dirp._ptr);
   auto oid_dir = reinterpret_cast<OID *>(dirp.offset());
+  std::lock_guard<std::mutex> lg(latch);
   auto slot = find_empty_dir_entry(t, oid_dir, td);
   // TODO(jianqiuz): Can we do in place update here?
   oid_dir[0] += 1;
