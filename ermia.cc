@@ -2,6 +2,7 @@
 #include "dbcore/sm-chkpt.h"
 #include "dbcore/sm-cmd-log.h"
 #include "dbcore/sm-rep.h"
+#include "dbcore/sm-oid.h"
 #include "dbcore/sm-dir-it.h"
 
 #include "ermia.h"
@@ -216,6 +217,7 @@ DirIterator *ConcurrentMasstreeIndex::GetRecordMultiIt(transaction *t, rc_t &rc,
         dbtuple *tuple = nullptr;
         if (found) {
             LOG_IF(FATAL, config::is_backup_srv()) << "GetRecordMulti is not supportted for backup server";
+            dir_it->dirp = oidmgr->dirp(table_descriptor->GetTupleArray(), dir_oid);
             bool ok = oidmgr->oid_get_dir(table_descriptor->GetTupleArray(), dir_oid, *(dir_it->_ptr));
             ALWAYS_ASSERT(ok);
             volatile_write(rc._val, RC_TRUE);
@@ -361,7 +363,7 @@ inline int printhex(const varstr &key) {
 /* OID_DIR Object structure:
  * OID_DIR is an array that stores the OID to the real data, the last entry for in the OID_DIR object
  * Stores the OID to another OID_DIR Object (sub-dir), so that the OID_DIR size can be very large (2^32 - 1)
- * The first level OID_DIR Object is special, the first entry stores the number of oid(with data) in current OID_DIR.
+ * The first level OID_DIR Object is special, It contains a OID_DIR_HEADER_SIZE length of header
  */
 // TODO(jianqiuz): Uniqueness check for OID dir. We shouldn't have two same OID entry in one OID Dir.
 bool ConcurrentMasstreeIndex::InsertToDir(transaction *t, const varstr &key, OID oid) {
@@ -377,14 +379,15 @@ retry:
       DLOG(INFO) << "Insert the first entry to oid-dir";
       uint32_t size = sizeof(OID) * OID_DIR_SIZE;
       OID *oid_dir = reinterpret_cast<OID *>(MM::allocate(size));
-      oid_dir[0] = 1;
-      oid_dir[1] = oid;
+      fat_ptr dirp = NULL_PTR;
+      oid_dir[OID_DIR_COUNT_INDEX] = 1;
+      oid_dir[OID_DIR_LATCH_INDEX] = 0x00000000;
+      oid_dir[OID_DIR_HEADER_SIZE] = oid;
       {
         dir_oid = oidmgr->alloc_oid(td->GetTupleFid());
         ALWAYS_ASSERT(dir_oid != INVALID_OID);
-
         // TODO(jianqiuz): Is the size code okay?
-        fat_ptr dirp = fat_ptr::make(oid_dir, 0, fat_ptr::ASI_DIR_FLAG);
+        dirp = fat_ptr::make(oid_dir, 0, fat_ptr::ASI_DIR_FLAG);
         oidmgr->oid_put_new(td->GetTupleFid(), dir_oid, dirp);
         DLOG(INFO) << "Insert the oid dir fat pointer addr: " << std::hex << dirp._ptr << ", Original addr: " << std::hex << oid_dir;
       }
@@ -393,6 +396,7 @@ retry:
         return true;
       }
       oidmgr->free_oid(td->GetTupleFid(), dir_oid);
+      // MM::deallocate(dirp);
       goto retry;
   }
   // FIXME(jianqiuz): Currently using MCS_LOCK, but
@@ -401,13 +405,16 @@ retry:
   DLOG(INFO) << "Get the oid dir pointer addr: " << std::hex << dirp.offset();
   ALWAYS_ASSERT(dirp._ptr);
   auto oid_dir = reinterpret_cast<OID *>(dirp.offset());
-  std::lock_guard<std::mutex> lg(latch);
+
+  XLock(oid_dir + OID_DIR_LATCH_INDEX);
   auto slot = find_empty_dir_entry(t, oid_dir, td);
-  // TODO(jianqiuz): Can we do in place update here?
   oid_dir[0] += 1;
   *slot = oid;
+  XUnlock(oid_dir + OID_DIR_LATCH_INDEX);
+
   return true;
 }
+
 
 // Should only be called via InsertToDir, already entered epoch
 static inline OID *find_empty_dir_entry(transaction *t, OID *chunk, ermia::TableDescriptor *td) {
@@ -417,8 +424,10 @@ static inline OID *find_empty_dir_entry(transaction *t, OID *chunk, ermia::Table
     OID *result = nullptr;
     const uint32_t rec_count = reinterpret_cast<uint32_t>(chunk[0]);
     DLOG(INFO) << "Current record count = " << rec_count;
-    auto depth = (rec_count + 1) / (OID_DIR_SIZE - 1);
-    auto pos = (rec_count + 1) % (OID_DIR_SIZE - 1);
+
+    auto depth = (rec_count + OID_DIR_HEADER_SIZE) / (OID_DIR_SIZE - 1);
+    auto pos = (rec_count + OID_DIR_HEADER_SIZE) % (OID_DIR_SIZE - 1);
+
     DLOG(INFO) << "Insert the record into oid_dir depth = " << depth << " index = " << pos;
     OID new_dir_oid = INVALID_OID;
     if (!pos) {

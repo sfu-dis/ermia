@@ -8,6 +8,8 @@ namespace ermia {
 
 struct DirIterator {
   std::vector<OID> *_ptr;
+  /* For debug use, store the oid_dir ptr */
+  OID *dirp;
   TableDescriptor *td;
   transaction *t;
   int idx = 0;
