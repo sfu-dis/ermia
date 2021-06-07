@@ -406,11 +406,13 @@ retry:
   ALWAYS_ASSERT(dirp._ptr);
   auto oid_dir = reinterpret_cast<OID *>(dirp.offset());
 
-  XLock(oid_dir + OID_DIR_LATCH_INDEX);
-  auto slot = find_empty_dir_entry(t, oid_dir, td);
-  oid_dir[0] += 1;
-  *slot = oid;
-  XUnlock(oid_dir + OID_DIR_LATCH_INDEX);
+  {
+    XLock(oid_dir + OID_DIR_LATCH_INDEX);
+    DEFER(XUnlock(oid_dir + OID_DIR_LATCH_INDEX));
+    auto slot = find_empty_dir_entry(t, oid_dir, td);
+    oid_dir[0] += 1;
+    *slot = oid;
+  }
 
   return true;
 }

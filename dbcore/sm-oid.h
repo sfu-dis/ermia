@@ -339,6 +339,7 @@ struct sm_oid_mgr {
   bool oid_get_dir(oid_array *oa, OID o, std::vector<OID> &out_vec) {
     auto root_oid_ptr = dirp(oa, o);
     RLock(root_oid_ptr + OID_DIR_LATCH_INDEX);
+    DEFER(RUnlock(root_oid_ptr + OID_DIR_LATCH_INDEX));
     auto rec_count = reinterpret_cast<uint32_t>(root_oid_ptr[0]);
     /* 
      * Only the 0-level oid_dir record stores from index 2, 0 to 1(inclusive) 
@@ -357,7 +358,6 @@ struct sm_oid_mgr {
         DLOG(INFO) << "Following the next level sub-dir: " << cur_dir;
         idx = 0;
     }
-    RUnlock(root_oid_ptr + OID_DIR_LATCH_INDEX);
     return true;
   }
 
