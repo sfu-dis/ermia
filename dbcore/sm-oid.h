@@ -361,6 +361,80 @@ struct sm_oid_mgr {
     return true;
   }
 
+  inline OID dir_get_index(oid_array *oa, OID *rootp, uint64_t index, bool &eof) {
+    /* Index starts from 1 */
+    ALWAYS_ASSERT(index > 0);
+    RLock(rootp + OID_DIR_LATCH_INDEX);
+    DEFER(RUnlock(rootp + OID_DIR_LATCH_INDEX));
+    auto rec_count = reinterpret_cast<uint32_t>(rootp[0]);
+    if (index <= rec_count) {
+        eof = false;
+    } else {
+        eof = true;
+        return INVALID_OID;
+    }
+    auto layer = (index + OID_DIR_HEADER_SIZE - 1) / (OID_DIR_SIZE - 1);
+    auto pos = (index + OID_DIR_HEADER_SIZE - 1) % (OID_DIR_SIZE - 1);
+    ALWAYS_ASSERT(pos != OID_DIR_HEADER_SIZE - 1);
+    ALWAYS_ASSERT(layer >= 0);
+    auto cur_dir = rootp;
+    while(layer != 0) {
+        cur_dir = reinterpret_cast<OID *>(oa->get(cur_dir[OID_DIR_SIZE - 1])->offset());
+        layer -= 1;
+    }
+    return cur_dir[pos];
+  }
+
+
+  // inline OID dir_get_index(oid_array *oa, OID dir_oid, uint64_t index, bool &eof) {
+  //   /* Index starts from 1 */
+  //   ALWAYS_ASSERT(index > 0);
+  //   auto rootp = dirp(oa, dir_oid);
+  //   RLock(rootp + OID_DIR_LATCH_INDEX);
+  //   DEFER(RUnlock(rootp + OID_DIR_LATCH_INDEX));
+  //   auto rec_count = reinterpret_cast<uint32_t>(rootp[0]);
+  //   if (index <= rec_count) {
+  //       eof = false;
+  //   } else {
+  //       eof = true;
+  //       return INVALID_OID;
+  //   }
+  //   auto layer = (index + OID_DIR_HEADER_SIZE - 1) / (OID_DIR_SIZE - 1);
+  //   auto pos = (index + OID_DIR_HEADER_SIZE - 1) % (OID_DIR_SIZE - 1);
+  //   ALWAYS_ASSERT(pos != OID_DIR_HEADER_SIZE - 1);
+  //   ALWAYS_ASSERT(layer >= 0);
+  //   auto cur_dir = rootp;
+  //   while(layer != 0) {
+  //       cur_dir = reinterpret_cast<OID *>(oa->get(cur_dir[OID_DIR_SIZE - 1])->offset());
+  //       layer -= 1;
+  //   }
+  //   return cur_dir[pos];
+  // }
+
+  /* 
+   * Return the next layer and pos as well as the current OID
+   */
+  OID dir_get_next_pos(oid_array *oa, OID dir_oid, uint64_t &layer, uint64_t &pos, bool &eof) {
+    ALWAYS_ASSERT(pos != OID_DIR_HEADER_SIZE - 1);
+    ALWAYS_ASSERT(layer >= 0);
+    auto rootp = dirp(oa, dir_oid);
+
+    RLock(rootp + OID_DIR_LATCH_INDEX);
+    DEFER(RUnlock(rootp + OID_DIR_LATCH_INDEX));
+
+    auto rec_count = reinterpret_cast<uint32_t>(rootp[0]);
+    int64_t index = 0;
+    if (layer > 0) {
+        index = (OID_DIR_SIZE - OID_DIR_HEADER_SIZE - 1) + (layer - 1) * (OID_DIR_SIZE - 1) + pos + 1;
+    } else {
+        index = pos - OID_DIR_HEADER_SIZE + 1;
+    }
+    auto t_layer = layer;
+    auto cur_dir = rootp;
+    // TODO(jianqiuz): Do we need this function?
+    return INVALID_OID;
+  }
+
   bool file_exists(FID f);
   void recreate_file(FID f);              // for recovery only
   void recreate_allocator(FID f, OID m);  // for recovery only

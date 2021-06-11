@@ -218,8 +218,9 @@ DirIterator *ConcurrentMasstreeIndex::GetRecordMultiIt(transaction *t, rc_t &rc,
         if (found) {
             LOG_IF(FATAL, config::is_backup_srv()) << "GetRecordMulti is not supportted for backup server";
             dir_it->dirp = oidmgr->dirp(table_descriptor->GetTupleArray(), dir_oid);
-            bool ok = oidmgr->oid_get_dir(table_descriptor->GetTupleArray(), dir_oid, *(dir_it->_ptr));
-            ALWAYS_ASSERT(ok);
+            // SKIP THE heavy oid_get_dir
+            // bool ok = oidmgr->oid_get_dir(table_descriptor->GetTupleArray(), dir_oid, *(dir_it->_ptr));
+            //  ALWAYS_ASSERT(ok);
             volatile_write(rc._val, RC_TRUE);
             return dir_it;
         } else {
