@@ -32,7 +32,7 @@ inline void XUnlock(OID *lock) {
 inline void RLock(OID *lock) {
     int32_t *ptr = reinterpret_cast<int32_t *>(lock);
 retry_x:
-    while(*ptr & LOCK_MASK);
+    while(volatile_read(*ptr) & LOCK_MASK);
 retry_s:
     int32_t lock_word = __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
     if (lock_word & LOCK_MASK) goto retry_x;
