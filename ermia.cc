@@ -201,12 +201,13 @@ void ConcurrentMasstreeIndex::GetRecord(transaction *t, rc_t &rc, const varstr &
   }
 }
 
-DirIterator *ConcurrentMasstreeIndex::GetRecordMultiIt(transaction *t, rc_t &rc, const varstr &key) {
-    rc = {RC_INVALID};
+rc_t ConcurrentMasstreeIndex::GetRecordMultiIt(transaction *t, const varstr &key, DirIterator *out) {
+    rc_t rc = {RC_INVALID};
     OID dir_oid = INVALID_OID;
-    std::vector<OID> oids;
     ermia::varstr tmpval;
-    auto dir_it = new DirIterator(t, table_descriptor);
+    /* Move this to stack */
+    out->t = t;
+    out->td = table_descriptor;
     if (!t) {
         auto e = MM::epoch_enter();
         rc._val = masstree_.search(key, dir_oid, e, nullptr) ? RC_TRUE : RC_FALSE;
@@ -217,16 +218,12 @@ DirIterator *ConcurrentMasstreeIndex::GetRecordMultiIt(transaction *t, rc_t &rc,
         dbtuple *tuple = nullptr;
         if (found) {
             LOG_IF(FATAL, config::is_backup_srv()) << "GetRecordMulti is not supportted for backup server";
-            dir_it->dirp = oidmgr->dirp(table_descriptor->GetTupleArray(), dir_oid);
-            // SKIP THE heavy oid_get_dir
-            // bool ok = oidmgr->oid_get_dir(table_descriptor->GetTupleArray(), dir_oid, *(dir_it->_ptr));
-            //  ALWAYS_ASSERT(ok);
+            out->dirp = oidmgr->dirp(table_descriptor->GetTupleArray(), dir_oid);
             volatile_write(rc._val, RC_TRUE);
-            return dir_it;
+            return rc;
         } else {
             volatile_write(rc._val, RC_FALSE);
-            delete dir_it;
-            return nullptr;
+            return rc;
         }
     }
  

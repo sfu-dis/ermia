@@ -7,13 +7,16 @@
 namespace ermia {
 
 struct DirIterator {
-  /* For debug use, store the oid_dir ptr */
   OID *dirp;
   TableDescriptor *td;
   transaction *t;
   int idx = 0;
   DirIterator(transaction *t, TableDescriptor *td) : td(td), t(t) {
 
+  };
+
+  DirIterator() {
+    
   };
 
   ~DirIterator() {
@@ -29,12 +32,10 @@ redo:
     }
     dbtuple *tuple = nullptr;
     tuple = oidmgr->oid_get_version(td->GetTupleArray(), o, t->xc);
-    bool found = true;
     if (!tuple) {
         DLOG(WARNING) << "(SKIPPED) Some tuple is empty: OID = " << std::hex << o;
-        found = false;
     }
-    if (found) {
+    if (tuple) {
         bool ret = t->DoTupleRead(tuple, &tmpval)._val;
         if (!ret) {
             DLOG(WARNING) << "(SKIPPED) Cannot do tuple read for OID = " << std::hex << o;
@@ -43,19 +44,17 @@ redo:
         }
 	    idx += 1;
         return tmpval;
-    } else if (config::phantom_prot) {
-        // volatile_write(rc._val, DoNodeRead(t, sinfo.first, sinfo.second)._val);
-        eof = true;
-        return tmpval;
     } else {
         idx += 1;
         goto redo;
     }
-
   }
 
-
-  // When cleanup, delete it
+  void reset() {
+    t = nullptr;
+    td = nullptr;
+    idx = 0;
+  }
 };
 
 }

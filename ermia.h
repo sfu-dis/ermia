@@ -154,7 +154,7 @@ public:
                          OID *out_oid = nullptr) override;
   virtual void GetRecordMulti(transaction *t, rc_t &rc, const varstr &key, std::vector<varstr> &value,
                               std::vector<OID> *oids = nullptr);
-  virtual DirIterator *GetRecordMultiIt(transaction *t, rc_t &rc, const varstr &key);
+  virtual rc_t GetRecordMultiIt(transaction *t, const varstr &key, DirIterator *out);
 
   rc_t UpdateRecord(transaction *t, const varstr &key, varstr &value) override;
   rc_t InsertRecord(transaction *t, const varstr &key, varstr &value, OID *out_oid = nullptr) override;
