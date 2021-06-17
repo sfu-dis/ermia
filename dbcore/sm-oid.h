@@ -12,6 +12,41 @@
 
 namespace ermia {
 
+#define LOCK_MASK (1 << 31)
+
+inline void XLock(OID *lock) {
+    int32_t *ptr = reinterpret_cast<int32_t *>(lock);
+    int32_t expected = 0;
+    int32_t locked = expected | LOCK_MASK;
+    while (*ptr != expected or 
+            !__atomic_compare_exchange_n(ptr, &expected, locked, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        expected = 0;
+    }
+}
+
+inline void XUnlock(OID *lock) {
+    int32_t *ptr = reinterpret_cast<int32_t *>(lock);
+    __atomic_store_n(ptr, 0, __ATOMIC_RELEASE);
+}
+
+inline void RLock(OID *lock) {
+    int32_t *ptr = reinterpret_cast<int32_t *>(lock);
+retry_x:
+    while(volatile_read(*ptr) & LOCK_MASK);
+retry_s:
+    int32_t lock_word = __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
+    if (lock_word & LOCK_MASK) goto retry_x;
+    int32_t desired = lock_word + 1;
+    bool ok = __atomic_compare_exchange_n(ptr, &lock_word, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    if (!ok) goto retry_s;
+}
+
+inline void RUnlock(OID *lock) {
+    int32_t *ptr = reinterpret_cast<int32_t *>(lock);
+    __atomic_fetch_sub(ptr, 1, __ATOMIC_ACQ_REL);
+}
+
+
 typedef epoch_mgr::epoch_num epoch_num;
 
 /* OID arrays and allocators alike always occupy an integer number
@@ -295,13 +330,22 @@ struct sm_oid_mgr {
   inline fat_ptr oid_get(oid_array *oa, OID o) { return *oa->get(o); }
   inline fat_ptr *oid_get_ptr(oid_array *oa, OID o) { return oa->get(o); }
 
-  bool oid_get_dir(oid_array *oa, OID o, std::vector<OID> &out_vec) {
+  inline OID *dirp(oid_array *oa, OID o) {
     auto p = oa->get(o);
     ALWAYS_ASSERT(p->asi() & fat_ptr::ASI_DIR);
-    auto root_oid_ptr = reinterpret_cast<OID *>(p->offset());
+    auto pp = reinterpret_cast<OID *>(p->offset());
+    return pp;
+  }
+  bool oid_get_dir(oid_array *oa, OID o, std::vector<OID> &out_vec) {
+    auto root_oid_ptr = dirp(oa, o);
+    RLock(root_oid_ptr + OID_DIR_LATCH_INDEX);
+    DEFER(RUnlock(root_oid_ptr + OID_DIR_LATCH_INDEX));
     auto rec_count = reinterpret_cast<uint32_t>(root_oid_ptr[0]);
-    /* Only the 0-level oid_dir record stores from index 1, 0 is used for store header */
-    auto idx = 1;
+    /* 
+     * Only the 0-level oid_dir record stores from index 2, 0 to 1(inclusive) 
+     * is used for store header 
+     */
+    auto idx = OID_DIR_HEADER_SIZE;
     auto cur_dir = root_oid_ptr;
     while (rec_count) {
         if (idx != OID_DIR_SIZE - 1) {
@@ -315,6 +359,80 @@ struct sm_oid_mgr {
         idx = 0;
     }
     return true;
+  }
+
+  inline OID dir_get_index(oid_array *oa, OID *rootp, uint64_t index, bool &eof) {
+    /* Index starts from 1 */
+    ALWAYS_ASSERT(index > 0);
+    RLock(rootp + OID_DIR_LATCH_INDEX);
+    DEFER(RUnlock(rootp + OID_DIR_LATCH_INDEX));
+    auto rec_count = reinterpret_cast<uint32_t>(rootp[0]);
+    if (index <= rec_count) {
+        eof = false;
+    } else {
+        eof = true;
+        return INVALID_OID;
+    }
+    auto layer = (index + OID_DIR_HEADER_SIZE - 1) / (OID_DIR_SIZE - 1);
+    auto pos = (index + OID_DIR_HEADER_SIZE - 1) % (OID_DIR_SIZE - 1);
+    ALWAYS_ASSERT(pos != OID_DIR_HEADER_SIZE - 1);
+    ALWAYS_ASSERT(layer >= 0);
+    auto cur_dir = rootp;
+    while(layer != 0) {
+        cur_dir = reinterpret_cast<OID *>(oa->get(cur_dir[OID_DIR_SIZE - 1])->offset());
+        layer -= 1;
+    }
+    return cur_dir[pos];
+  }
+
+
+  // inline OID dir_get_index(oid_array *oa, OID dir_oid, uint64_t index, bool &eof) {
+  //   /* Index starts from 1 */
+  //   ALWAYS_ASSERT(index > 0);
+  //   auto rootp = dirp(oa, dir_oid);
+  //   RLock(rootp + OID_DIR_LATCH_INDEX);
+  //   DEFER(RUnlock(rootp + OID_DIR_LATCH_INDEX));
+  //   auto rec_count = reinterpret_cast<uint32_t>(rootp[0]);
+  //   if (index <= rec_count) {
+  //       eof = false;
+  //   } else {
+  //       eof = true;
+  //       return INVALID_OID;
+  //   }
+  //   auto layer = (index + OID_DIR_HEADER_SIZE - 1) / (OID_DIR_SIZE - 1);
+  //   auto pos = (index + OID_DIR_HEADER_SIZE - 1) % (OID_DIR_SIZE - 1);
+  //   ALWAYS_ASSERT(pos != OID_DIR_HEADER_SIZE - 1);
+  //   ALWAYS_ASSERT(layer >= 0);
+  //   auto cur_dir = rootp;
+  //   while(layer != 0) {
+  //       cur_dir = reinterpret_cast<OID *>(oa->get(cur_dir[OID_DIR_SIZE - 1])->offset());
+  //       layer -= 1;
+  //   }
+  //   return cur_dir[pos];
+  // }
+
+  /* 
+   * Return the next layer and pos as well as the current OID
+   */
+  OID dir_get_next_pos(oid_array *oa, OID dir_oid, uint64_t &layer, uint64_t &pos, bool &eof) {
+    ALWAYS_ASSERT(pos != OID_DIR_HEADER_SIZE - 1);
+    ALWAYS_ASSERT(layer >= 0);
+    auto rootp = dirp(oa, dir_oid);
+
+    RLock(rootp + OID_DIR_LATCH_INDEX);
+    DEFER(RUnlock(rootp + OID_DIR_LATCH_INDEX));
+
+    auto rec_count = reinterpret_cast<uint32_t>(rootp[0]);
+    int64_t index = 0;
+    if (layer > 0) {
+        index = (OID_DIR_SIZE - OID_DIR_HEADER_SIZE - 1) + (layer - 1) * (OID_DIR_SIZE - 1) + pos + 1;
+    } else {
+        index = pos - OID_DIR_HEADER_SIZE + 1;
+    }
+    auto t_layer = layer;
+    auto cur_dir = rootp;
+    // TODO(jianqiuz): Do we need this function?
+    return INVALID_OID;
   }
 
   bool file_exists(FID f);

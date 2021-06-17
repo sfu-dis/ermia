@@ -3,6 +3,7 @@
 #include "../dbcore/sm-log-recover-impl.h"
 #include "txn.h"
 #include "../benchmarks/record/encoder.h"
+#include "../dbcore/sm-dir-it.h"
 #include "ermia_internal.h"
 
 namespace ermia {
@@ -79,8 +80,12 @@ public:
 class ConcurrentMasstreeIndex : public OrderedIndex {
   friend struct sm_log_recover_impl;
   friend class sm_chkpt_mgr;
+public:
+  const std::string name;
 
 private:
+  mcs_lock lock;
+  std::mutex latch;
   ConcurrentMasstree masstree_;
 
   struct SearchRangeCallback {
@@ -139,6 +144,7 @@ private:
 
 public:
   ConcurrentMasstreeIndex(const char *table_name, bool primary) : OrderedIndex(table_name, primary) {}
+  ConcurrentMasstreeIndex(const char *table_name, const std::string &index_name, bool primary) : OrderedIndex(table_name, primary), name(index_name) {}
 
   ConcurrentMasstree &GetMasstree() { return masstree_; }
 
@@ -148,6 +154,7 @@ public:
                          OID *out_oid = nullptr) override;
   virtual void GetRecordMulti(transaction *t, rc_t &rc, const varstr &key, std::vector<varstr> &value,
                               std::vector<OID> *oids = nullptr);
+  virtual rc_t GetRecordMultiIt(transaction *t, const varstr &key, DirIterator *out);
 
   rc_t UpdateRecord(transaction *t, const varstr &key, varstr &value) override;
   rc_t InsertRecord(transaction *t, const varstr &key, varstr &value, OID *out_oid = nullptr) override;

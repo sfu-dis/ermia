@@ -408,12 +408,105 @@ private:
   bool is_primary_idx_;
   TableDescriptor *table_descriptor_;
 
+public:
   static leaf_type *leftmost_descend_layer(node_base_type *n);
   class size_walk_callback;
   template <bool Reverse> class search_range_scanner_base;
   template <bool Reverse> class no_callback_search_range_scanner;
   template <bool Reverse> class low_level_search_range_scanner;
+  template <bool Reverse> class low_level_iterator_scanner;
   template <typename F> class low_level_search_range_callback_wrapper;
+
+template <bool IsReverse>
+  class ScanIterator {
+   public:
+    Masstree::scan_info<masstree_params> sinfo_;
+    low_level_iterator_scanner<IsReverse> scanner_;
+    TXN::xid_context *xc_;
+
+    using scan_helper_t =
+        typename std::conditional<IsReverse, Masstree::reverse_scan_helper,
+                                  Masstree::forward_scan_helper>::type;
+    scan_helper_t helper_;
+
+   private:
+    ermia::dbtuple *tuple_;
+    mbtree<P> *btr_;
+    int scancount_;
+
+  public:
+   ScanIterator(TXN::xid_context *xc, mbtree<P> *btr, const key_type &lower,
+                const key_type *upper)
+       : sinfo_(btr->get_table(), lower),
+         scanner_(btr, upper),
+         xc_(xc),
+         btr_(btr) {}
+   int count() const { return scancount_; }
+
+   OID value() const { return sinfo_.entry.value(); }
+   Masstree::Str key() { return sinfo_.ka.full_string(); }
+
+   oid_array *tuple_array() const { return btr_->tuple_array_; }
+   oid_array *pdest_array() const { return btr_->pdest_array_; }
+
+   static ScanIterator<IsReverse> factory(
+          mbtree<P> *mbtree,
+          ermia::TXN::xid_context *xc,
+          const ermia::varstr &start_key,
+          const ermia::varstr *end_key,
+          bool emit_firstkey=true) {
+     ScanIterator<IsReverse> scan_iterator(xc, mbtree, start_key, end_key);
+     threadinfo ti(xc->begin_epoch);
+
+     auto &si = scan_iterator.sinfo_;
+     auto &scanner = scan_iterator.scanner_;
+
+     while (1) {
+       si.state = si.stack[si.stackpos].find_initial(scan_iterator.helper_, si.ka, emit_firstkey, si.entry, ti);
+       scanner.visit_leaf(si.stack[si.stackpos], si.ka, ti);
+       if (si.state != Masstree::scan_info<P>::mystack_type::scan_down)
+         break;
+       si.ka.shift();
+       ++si.stackpos;
+     }
+
+     return scan_iterator;
+   }
+
+   // Caller need to free the memory
+   static ScanIterator<IsReverse> *session_factory(
+          mbtree<P> *mbtree,
+          ermia::TXN::xid_context *xc,
+          const ermia::varstr &start_key,
+          const ermia::varstr *end_key,
+          bool emit_firstkey=true) {
+     ScanIterator<IsReverse> *scan_iterator_ptr = new ScanIterator(xc, mbtree, start_key, end_key);
+     ScanIterator<IsReverse> &scan_iterator = *scan_iterator_ptr;
+     threadinfo ti(xc->begin_epoch);
+
+     auto &si = scan_iterator.sinfo_;
+     auto &scanner = scan_iterator.scanner_;
+
+     while (1) {
+       si.state = si.stack[si.stackpos].find_initial(scan_iterator.helper_, si.ka, emit_firstkey, si.entry, ti);
+       scanner.visit_leaf(si.stack[si.stackpos], si.ka, ti);
+       if (si.state != Masstree::scan_info<P>::mystack_type::scan_down)
+         break;
+       si.ka.shift();
+       ++si.stackpos;
+     }
+
+     return scan_iterator_ptr;
+   }
+
+   template <bool IsNext>
+   bool init_or_next() {
+       threadinfo ti(xc_->begin_epoch);
+       return btr_->get_table()->template scan_init_or_next_value<IsNext>(
+           helper_, scanner_, xc_, ti, &sinfo_);
+    }
+  };
+
 };
 
 template <typename P>
@@ -664,6 +757,40 @@ private:
   Masstree::leaf<P> *n_;
   uint64_t v_;
   low_level_search_range_callback &callback_;
+  const mbtree<P> *btr_ptr_;
+};
+
+template <typename P>
+template <bool Reverse>
+class mbtree<P>::low_level_iterator_scanner
+    : public search_range_scanner_base<Reverse> {
+public:
+  low_level_iterator_scanner(const mbtree<P> *btr_ptr,
+                                 const key_type *boundary)
+      : search_range_scanner_base<Reverse>(boundary), btr_ptr_(btr_ptr) {}
+  inline void visit_leaf(const Masstree::scanstackelt<P> &iter,
+                  const Masstree::key<uint64_t> &key, threadinfo &) {
+    // this->n_ = iter.node();
+    // this->v_ = iter.full_version_value();
+    // callback_.on_resp_node(this->n_, this->v_);
+    if (this->boundary_)
+      this->check(iter, key);
+  }
+
+  // Same as visit_value, but without invoking the callback
+  inline bool visit_value_no_callback(const Masstree::key<uint64_t> &key) {
+    if (this->boundary_compar_) {
+      lcdf::Str bs(this->boundary_->data(), this->boundary_->size());
+      if ((!Reverse && bs <= key.full_string()) ||
+          (Reverse && bs >= key.full_string()))
+        return false;
+    }
+    return true;
+  }
+
+private:
+  // Masstree::leaf<P> *n_;
+  // uint64_t v_;
   const mbtree<P> *btr_ptr_;
 };
 
