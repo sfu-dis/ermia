@@ -386,31 +386,6 @@ struct sm_oid_mgr {
   }
 
 
-  // inline OID dir_get_index(oid_array *oa, OID dir_oid, uint64_t index, bool &eof) {
-  //   /* Index starts from 1 */
-  //   ALWAYS_ASSERT(index > 0);
-  //   auto rootp = dirp(oa, dir_oid);
-  //   RLock(rootp + OID_DIR_LATCH_INDEX);
-  //   DEFER(RUnlock(rootp + OID_DIR_LATCH_INDEX));
-  //   auto rec_count = reinterpret_cast<uint32_t>(rootp[0]);
-  //   if (index <= rec_count) {
-  //       eof = false;
-  //   } else {
-  //       eof = true;
-  //       return INVALID_OID;
-  //   }
-  //   auto layer = (index + OID_DIR_HEADER_SIZE - 1) / (OID_DIR_SIZE - 1);
-  //   auto pos = (index + OID_DIR_HEADER_SIZE - 1) % (OID_DIR_SIZE - 1);
-  //   ALWAYS_ASSERT(pos != OID_DIR_HEADER_SIZE - 1);
-  //   ALWAYS_ASSERT(layer >= 0);
-  //   auto cur_dir = rootp;
-  //   while(layer != 0) {
-  //       cur_dir = reinterpret_cast<OID *>(oa->get(cur_dir[OID_DIR_SIZE - 1])->offset());
-  //       layer -= 1;
-  //   }
-  //   return cur_dir[pos];
-  // }
-
   /* 
    * Return the next layer and pos as well as the current OID
    */

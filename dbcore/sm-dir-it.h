@@ -36,12 +36,8 @@ redo:
         DLOG(WARNING) << "(SKIPPED) Some tuple is empty: OID = " << std::hex << o;
     }
     if (tuple) {
-        bool ret = t->DoTupleRead(tuple, &tmpval)._val;
-        if (!ret) {
-            DLOG(WARNING) << "(SKIPPED) Cannot do tuple read for OID = " << std::hex << o;
-            idx += 1;
-            goto redo;
-        }
+        auto ret = t->DoTupleRead(tuple, &tmpval)._val;
+        ALWAYS_ASSERT(ret == RC_TRUE);
 	    idx += 1;
         return tmpval;
     } else {
