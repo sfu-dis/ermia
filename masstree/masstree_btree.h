@@ -503,7 +503,7 @@ template <bool IsReverse>
    bool init_or_next() {
        threadinfo ti(xc_->begin_epoch);
        return btr_->get_table()->template scan_init_or_next_value<IsNext>(
-           helper_, scanner_, xc_, ti, &sinfo_);
+           helper_, scanner_, ti, &sinfo_);
     }
   };
 

@@ -389,7 +389,7 @@ struct sm_oid_mgr {
   /* 
    * Return the next layer and pos as well as the current OID
    */
-  OID dir_get_next_pos(oid_array *oa, OID dir_oid, uint64_t &layer, uint64_t &pos, bool &eof) {
+  OID dir_get_next_pos(oid_array *oa, OID dir_oid, uint64_t &layer, uint64_t &pos) {
     ALWAYS_ASSERT(pos != OID_DIR_HEADER_SIZE - 1);
     ALWAYS_ASSERT(layer >= 0);
     auto rootp = dirp(oa, dir_oid);
@@ -397,15 +397,12 @@ struct sm_oid_mgr {
     RLock(rootp + OID_DIR_LATCH_INDEX);
     DEFER(RUnlock(rootp + OID_DIR_LATCH_INDEX));
 
-    auto rec_count = reinterpret_cast<uint32_t>(rootp[0]);
     int64_t index = 0;
     if (layer > 0) {
         index = (OID_DIR_SIZE - OID_DIR_HEADER_SIZE - 1) + (layer - 1) * (OID_DIR_SIZE - 1) + pos + 1;
     } else {
         index = pos - OID_DIR_HEADER_SIZE + 1;
     }
-    auto t_layer = layer;
-    auto cur_dir = rootp;
     // TODO(jianqiuz): Do we need this function?
     return INVALID_OID;
   }

@@ -92,7 +92,6 @@ public:
 
   template <bool IsNext, typename H, typename F>
   bool scan_init_or_next_value(H helper, F &scanner,
-                                       ermia::TXN::xid_context *xc,
                                        threadinfo &ti,
                                        scan_info<P> *si) const;
 

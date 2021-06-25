@@ -11,17 +11,9 @@ struct DirIterator {
   TableDescriptor *td;
   transaction *t;
   int idx = 0;
-  DirIterator(transaction *t, TableDescriptor *td) : td(td), t(t) {
-
-  };
-
-  DirIterator() {
-    
-  };
-
-  ~DirIterator() {
-      
-  }
+  DirIterator(transaction *t, TableDescriptor *td) : td(td), t(t) {}
+  DirIterator() {}
+  ~DirIterator() {}
 
   const ermia::varstr next(bool &eof) {
 redo:
