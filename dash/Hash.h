@@ -4,64 +4,36 @@
 #ifndef HASH_INTERFACE_H_
 #define HASH_INTERFACE_H_
 
-#include "util/pair.h"
+#include "../util/pair.h"
 #ifdef PMEM
 #include <libpmemobj.h>
 #endif
-#include "../dbcore/sm-coroutine.h"
 
 /*
 * Parent function of all hash indexes
 * Used to define the interface of the hash indexes
 */
-namespace dash {
 
-template <class K, class V>
+template <class T>
 class Hash {
  public:
   Hash(void) = default;
   ~Hash(void) = default;
+  /*0 means success insert, -1 means this key already exist, directory return*/
+  virtual int Insert(T, Value_t) = 0;
+  virtual int Insert(T, Value_t, bool) = 0;
+ 
+  virtual void bootRestore(){
 
-  virtual PROMISE(bool) Insert(K, V) = 0;
-  virtual PROMISE(bool) Delete(K) = 0;
-  virtual PROMISE(bool) Get(K, V *) = 0;
+  };
+  virtual void reportRestore(){
 
-  PROMISE(bool) Insert(K, V, bool);
-  PROMISE(bool) Delete(K, bool);
-  PROMISE(bool) Get(K key, V *, bool);
-
+  };
+  virtual bool Delete(T) = 0;
+  virtual bool Delete(T, bool) = 0;
+  virtual bool Get(T, Value_t*) = 0;
+  virtual bool Get(T key, Value_t*, bool is_in_epoch) = 0;
   virtual void getNumber() = 0;
-
-  static_assert(std::is_pointer_v<V>, "Value type has to be a pointer!");
 };
-
-template <class K, class V>
-PROMISE(bool) Hash<K, V>::Insert(K key, V value, bool is_in_epoch) {
-  if (!is_in_epoch) {
-    // auto epoch_guard = Allocator::AquireEpochGuard();
-    return Insert(key, value);
-  }
-  return Insert(key, value);
-}
-
-template <class K, class V>
-PROMISE(bool) Hash<K, V>::Delete(K key, bool is_in_epoch) {
-  if (!is_in_epoch) {
-    // auto epoch_guard = Allocator::AquireEpochGuard();
-    return Delete(key);
-  }
-  return Delete(key);
-}
-
-template <class K, class V>
-PROMISE(bool) Hash<K, V>::Get(K key, V *value, bool is_in_epoch) {
-  if (!is_in_epoch) {
-    // auto epoch_guard = Allocator::AquireEpochGuard();
-    return Get(key, value);
-  }
-  return Get(key, value);
-}
-
-} // namespace dash
 
 #endif  // _HASH_INTERFACE_H_
