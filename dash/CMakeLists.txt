@@ -1,0 +1,4 @@
+set_property(GLOBAL APPEND PROPERTY ALL_SRC
+  ${CMAKE_CURRENT_SOURCE_DIR}/util/utils.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/util/hash.cc
+)
