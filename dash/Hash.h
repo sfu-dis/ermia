@@ -11,27 +11,29 @@
  * Parent function of all hash indexes
  * Used to define the interface of the hash indexes
  */
+namespace ermia
+{
+  template <class K, class V>
+  class HashIndex
+  {
+  public:
+    Hash(void) = default;
+    ~Hash(void) = default;
+    /*0 means success insert, -1 means this key already exist, directory return*/
+    virtual int Insert(K, V) = 0;
+    virtual int Insert(K, V, bool) = 0;
 
-template <class K, class V>
-class Hash {
- public:
-  Hash(void) = default;
-  ~Hash(void) = default;
-  /*0 means success insert, -1 means this key already exist, directory return*/
-  virtual int Insert(K, V) = 0;
-  virtual int Insert(K, V, bool) = 0;
+    virtual void bootRestore(){
 
-  virtual void bootRestore(){
+    };
+    virtual void reportRestore(){
 
+    };
+    virtual bool Delete(K) = 0;
+    virtual bool Delete(K, bool) = 0;
+    virtual bool Get(K, V *) = 0;
+    virtual bool Get(K key, V *, bool is_in_epoch) = 0;
+    virtual void getNumber() = 0;
   };
-  virtual void reportRestore(){
-
-  };
-  virtual bool Delete(K) = 0;
-  virtual bool Delete(K, bool) = 0;
-  virtual bool Get(K, V *) = 0;
-  virtual bool Get(K key, V *, bool is_in_epoch) = 0;
-  virtual void getNumber() = 0;
-};
-
-#endif  // _HASH_INTERFACE_H_
+}
+#endif // _HASH_INTERFACE_H_
