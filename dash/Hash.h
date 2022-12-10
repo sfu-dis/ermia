@@ -4,7 +4,7 @@
 #ifndef HASH_INTERFACE_H_
 #define HASH_INTERFACE_H_
 
-#include "../util/pair.h"
+#include "util/pair.h"
 #endif
 
 /*
@@ -14,7 +14,7 @@
 namespace ermia
 {
   template <class K, class V>
-  class HashIndex
+  class Hash
   {
   public:
     Hash(void) = default;
