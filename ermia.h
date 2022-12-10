@@ -160,7 +160,7 @@ namespace ermia
     friend class sm_chkpt_mgr;
 
   private:
-    Hash<OID, varstr *> *dash_;
+    Hash<OID, varstr> *dash_;
 
     // expect_new indicates if we expect the record to not exist in the tree- is
     // just a hint that affects perf, not correctness. remove is put with
@@ -174,7 +174,7 @@ namespace ermia
     {
       Allocator::Initialize();
       size_t segment_number = 64;
-      dash_ = new extendible::Finger_EH<OID>(segment_number);
+      dash_ = new extendible::Finger_EH<OID, varstr>(segment_number);
     }
 
     // inline void *GetTable() override { return dash_.get_table(); }
@@ -203,10 +203,9 @@ namespace ermia
     // inline size_t Size() override { return dash_.size(); }
     // std::map<std::string, uint64_t> Clear() override;
     // inline void SetArrays() override { dash_.set_arrays(descriptor_); }
-    inline void
-    GetOID(const varstr &key, rc_t &rc, OID &out_oid) override
+    virtual inline void GetOID(const varstr &key, rc_t &rc, OID &out_oid) override
     {
-      bool found = dash_.Get(key, out_oid, false);
+      bool found = dash_->Get(key, out_oid, false);
       volatile_write(rc._val, found ? RC_TRUE : RC_FALSE);
     }
 
