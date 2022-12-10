@@ -160,7 +160,7 @@ namespace ermia
     friend class sm_chkpt_mgr;
 
   private:
-    Hash<OID> *dash_;
+    Hash<OID, varstr *> *dash_;
 
     // expect_new indicates if we expect the record to not exist in the tree- is
     // just a hint that affects perf, not correctness. remove is put with

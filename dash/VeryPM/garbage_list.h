@@ -95,7 +95,6 @@ public:
       this->destroy_callback_context = context;
       this->removed_item = removed_item;
       this->removal_epoch = epoch;
-#endif
     }
   };
   static_assert(std::is_pod<Item>::value, "Item should be POD");
