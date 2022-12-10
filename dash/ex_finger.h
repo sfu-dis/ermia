@@ -1234,7 +1234,7 @@ namespace extendible
           }
           else
           {
-            key_hash = h(&(curr_bucket->_[j].key), sizeof(Key_t));
+            key_hash = h(&(curr_bucket->_[j].key), sizeof(dash::Key_t));
           }
 
           if ((key_hash >> (64 - local_depth - 1)) == new_pattern)
@@ -1270,7 +1270,7 @@ namespace extendible
           }
           else
           {
-            key_hash = h(&(curr_bucket->_[j].key), sizeof(Key_t));
+            key_hash = h(&(curr_bucket->_[j].key), sizeof(dash::Key_t));
           }
           if ((key_hash >> (64 - local_depth - 1)) == new_pattern)
           {
@@ -1330,7 +1330,7 @@ namespace extendible
             }
             else
             {
-              key_hash = h(&(curr_bucket->_[j].key), sizeof(Key_t));
+              key_hash = h(&(curr_bucket->_[j].key), sizeof(dash::Key_t));
             }
 
             Insert4merge(curr_bucket->_[j].key, curr_bucket->_[j].value, key_hash,
@@ -1356,7 +1356,7 @@ namespace extendible
             }
             else
             {
-              key_hash = h(&(curr_bucket->_[j].key), sizeof(Key_t));
+              key_hash = h(&(curr_bucket->_[j].key), sizeof(dash::Key_t));
             }
             Insert4merge(curr_bucket->_[j].key, curr_bucket->_[j].value, key_hash,
                          curr_bucket->finger_array[j]); /*this shceme may destory
@@ -1383,7 +1383,7 @@ namespace extendible
             }
             else
             {
-              key_hash = h(&(curr_bucket->_[j].key), sizeof(Key_t));
+              key_hash = h(&(curr_bucket->_[j].key), sizeof(dash::Key_t));
             }
 
             Insert4merge(curr_bucket->_[j].key, curr_bucket->_[j].value, key_hash,
@@ -1409,7 +1409,7 @@ namespace extendible
             }
             else
             {
-              key_hash = h(&(curr_bucket->_[j].key), sizeof(Key_t));
+              key_hash = h(&(curr_bucket->_[j].key), sizeof(dash::Key_t));
             }
             Insert4merge(curr_bucket->_[j].key, curr_bucket->_[j].value, key_hash,
                          curr_bucket->finger_array[j]); /*this shceme may destory
