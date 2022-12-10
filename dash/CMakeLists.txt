@@ -60,19 +60,3 @@ option(USE_PMEM "enable persistent memory support" ON)
 
 set(libs_to_link
   pthread gflags)
-
-if(USE_PMEM MATCHES "ON")
-  message(STATUS "persistent memory support enabled, going to build with PMDK")
-  add_definitions(-DPMEM)
-  list(APPEND libs_to_link pmemobj pmem)
-endif()
-
-if(USE_PMEM MATCHES "ON")
-  add_executable(test_pmem src/test_pmem.cpp)
-  add_executable(example src/example.cpp)
-  target_link_libraries(test_pmem PRIVATE ${libs_to_link})
-  target_link_libraries(example PRIVATE ${libs_to_link})
-  add_dependencies(test_pmem PMDK)
-  add_dependencies(example PMDK)
-else()
-endif()
