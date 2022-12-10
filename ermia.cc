@@ -176,13 +176,13 @@ namespace ermia
     if (!t)
     {
       auto e = MM::epoch_enter();
-      rc._val = dash_.Get(key, oid, false) ? RC_TRUE : RC_FALSE;
+      rc._val = dash_->Get(key, &oid, false) ? RC_TRUE : RC_FALSE;
       MM::epoch_exit(0, e);
     }
     else
     {
       t->ensure_active();
-      bool found = dash_.Get(key, oid, false);
+      bool found = dash_->Get(key, &oid, false);
 
       dbtuple *tuple = nullptr;
       if (found)
@@ -309,7 +309,7 @@ namespace ermia
   bool ConcurrentDashIndex::InsertIfAbsent(transaction *t, const varstr &key,
                                            OID oid)
   {
-    bool found = dash_.Get(key, oid, false);
+    bool found = dash_->Get(key, oid, false);
     if (found)
       return false;
     bool inserted = dash_.Insert(key, oid, false);

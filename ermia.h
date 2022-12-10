@@ -179,8 +179,8 @@ namespace ermia
 
     // inline void *GetTable() override { return dash_.get_table(); }
 
-    virtual void Get(transaction *t, rc_t &rc, const varstr &key, varstr &value,
-                     OID *out_oid = nullptr) override;
+    // virtual void Get(transaction *t, rc_t &rc, const varstr &key, varstr &value,
+    //                  OID *out_oid = nullptr) override;
 
     inline rc_t Put(transaction *t, const varstr &key, varstr &value) override
     {
@@ -203,9 +203,9 @@ namespace ermia
     // inline size_t Size() override { return dash_.size(); }
     // std::map<std::string, uint64_t> Clear() override;
     // inline void SetArrays() override { dash_.set_arrays(descriptor_); }
-    virtual inline void GetOID(const varstr &key, rc_t &rc, OID &out_oid) override
+    inline void GetOID(const varstr &key, rc_t &rc, OID &out_oid) override
     {
-      bool found = dash_->Get(key, out_oid, false);
+      bool found = dash_->search(key, out_oid, false);
       volatile_write(rc._val, found ? RC_TRUE : RC_FALSE);
     }
 

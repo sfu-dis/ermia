@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "type_traits": "cpp",
-        "charconv": "cpp"
+        "charconv": "cpp",
+        "algorithm": "cpp"
     }
 }
