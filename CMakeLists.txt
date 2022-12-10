@@ -16,6 +16,7 @@ add_definitions(-DMASSTREE)
 set(MASSTREE_CONFIG "--enable-max-key-len=1024 --with-malloc=malloc")
 
 option(EXPORT_TPCE_INT64_KEYS "Dump TPC-E keys during load phase" OFF)
+
 if(${EXPORT_TPCE_INT64_KEYS})
   add_definitions(-DEXPORT_TPCE_INT64_KEYS)
 endif()
@@ -38,6 +39,7 @@ include_directories(third-party/sparsehash/src)
 add_subdirectory(benchmarks)
 add_subdirectory(dbcore)
 add_subdirectory(masstree)
+add_subdirectory(dash)
 
 set_property(GLOBAL APPEND PROPERTY ALL_ERMIA_SRC
   ${CMAKE_CURRENT_SOURCE_DIR}/ermia.cc
