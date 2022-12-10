@@ -5,7 +5,6 @@
 #define HASH_INTERFACE_H_
 
 #include "util/pair.h"
-#endif
 
 /*
  * Parent function of all hash indexes

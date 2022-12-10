@@ -24,8 +24,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "../util/hash.h"
-#include "../util/pair.h"
+#include "util/hash.h"
+#include "util/pair.h"
 #include "Hash.h"
 #include "allocator.h"
 
@@ -288,13 +288,13 @@ namespace extendible
       if constexpr (std::is_pointer<K>::value)
       {
         /* variable-length key*/
-        string_key *_key = reinterpret_cast<string_key *>(key);
+        dash::string_key *_key = reinterpret_cast<dash::string_key *>(key);
         for (int i = 0; i < 14; i += 1)
         {
           if (CHECK_BIT(mask, i) &&
-              (var_compare((reinterpret_cast<string_key *>(_[i].key))->key,
+              (var_compare((reinterpret_cast<dash::string_key *>(_[i].key))->key,
                            _key->key,
-                           (reinterpret_cast<string_key *>(_[i].key))->length,
+                           (reinterpret_cast<dash::string_key *>(_[i].key))->length,
                            _key->length)))
           {
             *value = _[i].value;
@@ -461,16 +461,16 @@ namespace extendible
       /*loop unrolling*/
       if constexpr (std::is_pointer<K>::value)
       {
-        string_key *_key = reinterpret_cast<string_key *>(key);
+        dash::string_key *_key = reinterpret_cast<dash::string_key *>(key);
         /*loop unrolling*/
         if (mask != 0)
         {
           for (int i = 0; i < 12; i += 4)
           {
             if (CHECK_BIT(mask, i) &&
-                (var_compare((reinterpret_cast<string_key *>(_[i].key))->key,
+                (var_compare((reinterpret_cast<dash::string_key *>(_[i].key))->key,
                              _key->key,
-                             (reinterpret_cast<string_key *>(_[i].key))->length,
+                             (reinterpret_cast<dash::string_key *>(_[i].key))->length,
                              _key->length)))
             {
               unset_hash(i, false);
@@ -479,8 +479,8 @@ namespace extendible
 
             if (CHECK_BIT(mask, i + 1) &&
                 (var_compare(
-                    reinterpret_cast<string_key *>(_[i + 1].key)->key, _key->key,
-                    (reinterpret_cast<string_key *>(_[i + 1].key))->length,
+                    reinterpret_cast<dash::string_key *>(_[i + 1].key)->key, _key->key,
+                    (reinterpret_cast<dash::string_key *>(_[i + 1].key))->length,
                     _key->length)))
             {
               unset_hash(i + 1, false);
@@ -489,8 +489,8 @@ namespace extendible
 
             if (CHECK_BIT(mask, i + 2) &&
                 (var_compare(
-                    reinterpret_cast<string_key *>(_[i + 2].key)->key, _key->key,
-                    (reinterpret_cast<string_key *>(_[i + 2].key))->length,
+                    reinterpret_cast<dash::string_key *>(_[i + 2].key)->key, _key->key,
+                    (reinterpret_cast<dash::string_key *>(_[i + 2].key))->length,
                     _key->length)))
             {
               unset_hash(i + 2, false);
@@ -499,8 +499,8 @@ namespace extendible
 
             if (CHECK_BIT(mask, i + 3) &&
                 (var_compare(
-                    reinterpret_cast<string_key *>(_[i + 3].key)->key, _key->key,
-                    (reinterpret_cast<string_key *>(_[i + 3].key))->length,
+                    reinterpret_cast<dash::string_key *>(_[i + 3].key)->key, _key->key,
+                    (reinterpret_cast<dash::string_key *>(_[i + 3].key))->length,
                     _key->length)))
             {
               unset_hash(i + 3, false);
@@ -509,9 +509,9 @@ namespace extendible
           }
 
           if (CHECK_BIT(mask, 12) &&
-              (var_compare(reinterpret_cast<string_key *>(_[12].key)->key,
+              (var_compare(reinterpret_cast<dash::string_key *>(_[12].key)->key,
                            _key->key,
-                           (reinterpret_cast<string_key *>(_[12].key))->length,
+                           (reinterpret_cast<dash::string_key *>(_[12].key))->length,
                            _key->length)))
           {
             unset_hash(12, false);
@@ -519,9 +519,9 @@ namespace extendible
           }
 
           if (CHECK_BIT(mask, 13) &&
-              (var_compare(reinterpret_cast<string_key *>(_[13].key)->key,
+              (var_compare(reinterpret_cast<dash::string_key *>(_[13].key)->key,
                            _key->key,
-                           (reinterpret_cast<string_key *>(_[13].key))->length,
+                           (reinterpret_cast<dash::string_key *>(_[13].key))->length,
                            _key->length)))
           {
             unset_hash(13, false);
@@ -2398,7 +2398,7 @@ namespace extendible
     uint64_t key_hash;
     if constexpr (std::is_pointer<K>::value)
     {
-      // key_hash = h(key, (reinterpret_cast<string_key *>(key))->length);
+      // key_hash = h(key, (reinterpret_cast<dash:: string_key *>(key))->length);
       key_hash = h(key->key, key->length);
     }
     else
