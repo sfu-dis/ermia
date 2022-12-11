@@ -662,7 +662,7 @@ namespace extendible
   template <class K, class V>
   struct Directory
   {
-    typedef Table<K, V> *table_p;
+    typedef extendible::Table<K, V> *table_p;
     uint32_t global_depth;
     uint32_t version;
     uint32_t depth_count;
@@ -688,9 +688,9 @@ namespace extendible
   template <class K, class V>
   struct Table
   {
-    static void New(Table<K, V> **tbl, size_t depth, Table<K, V> *pp)
+    static void New(extendible::Table<K, V> **tbl, size_t depth, extendible::Table<K, V> *pp)
     {
-      Allocator::ZAllocate((void **)tbl, kCacheLineSize, sizeof(Table<K, V>));
+      Allocator::ZAllocate((void **)tbl, kCacheLineSize, sizeof(extendible::Table<K, V>));
       (*tbl)->local_depth = depth;
       (*tbl)->state = -3;
       (*tbl)->next = pp;
@@ -736,8 +736,8 @@ namespace extendible
                                uint8_t meta_hash); /*with uniqueness check*/
     void Insert4merge(K key, V value, size_t key_hash, uint8_t meta_hash,
                       bool flag = false);
-    Table<K, V> *Split(Finger_EH<K, V> *ht, size_t);
-    void Merge(Table<K, V> *, bool flag = false);
+    extendible::Table<K, V> *Split(Finger_EH<K, V> *ht, size_t);
+    void Merge(extendible::Table<K, V> *, bool flag = false);
     int Delete(K key, size_t key_hash, uint8_t meta_hash, Directory<K, V> **_dir);
 
     int Next_displace(Bucket<K, V> *target, Bucket<K, V> *neighbor,
@@ -811,7 +811,7 @@ namespace extendible
     size_t local_depth;
     size_t pattern;
     int number;
-    Table<K, V> *next;
+    extendible::Table<K, V> *next;
     int state; /*-1 means this bucket is merging, -2 means this bucket is
                   splitting (SPLITTING), 0 meanning normal bucket, -3 means new
                   bucket (NEW)*/
@@ -819,8 +819,8 @@ namespace extendible
 
   /* it needs to verify whether this bucket has been deleted...*/
   template <class K, class V>
-  int Table<K, V>::Insert(K key, V value, size_t key_hash, uint8_t meta_hash,
-                          Directory<K, V> **_dir)
+  int extendible::Table<K, V>::Insert(K key, V value, size_t key_hash, uint8_t meta_hash,
+                                      Directory<K, V> **_dir)
   {
   RETRY:
     /*we need to first do the locking and then do the verify*/
@@ -836,8 +836,8 @@ namespace extendible
 
     auto old_sa = *_dir;
     auto x = (key_hash >> (8 * sizeof(key_hash) - old_sa->global_depth));
-    if (reinterpret_cast<Table<K, V> *>(reinterpret_cast<uint64_t>(old_sa->_[x]) &
-                                        tailMask) != this)
+    if (reinterpret_cast<extendible::Table<K, V> *>(reinterpret_cast<uint64_t>(old_sa->_[x]) &
+                                                    tailMask) != this)
     {
       neighbor->release_lock();
       target->release_lock();
@@ -939,8 +939,8 @@ namespace extendible
   }
 
   template <class K, class V>
-  void Table<K, V>::Insert4splitWithCheck(K key, V value, size_t key_hash,
-                                          uint8_t meta_hash)
+  void extendible::Table<K, V>::Insert4splitWithCheck(K key, V value, size_t key_hash,
+                                                      uint8_t meta_hash)
   {
     auto y = BUCKET_INDEX(key_hash);
     Bucket<K, V> *target = bucket + y;
@@ -1026,8 +1026,8 @@ namespace extendible
 
   /*the insert needs to be perfectly balanced, not destory the power of balance*/
   template <class K, class V>
-  void Table<K, V>::Insert4split(K key, V value, size_t key_hash,
-                                 uint8_t meta_hash)
+  void extendible::Table<K, V>::Insert4split(K key, V value, size_t key_hash,
+                                             uint8_t meta_hash)
   {
     auto y = BUCKET_INDEX(key_hash);
     Bucket<K, V> *target = bucket + y;
@@ -1108,8 +1108,8 @@ namespace extendible
   }
 
   template <class K, class V>
-  void Table<K, V>::Insert4merge(K key, V value, size_t key_hash,
-                                 uint8_t meta_hash, bool unique_check_flag)
+  void extendible::Table<K, V>::Insert4merge(K key, V value, size_t key_hash,
+                                             uint8_t meta_hash, bool unique_check_flag)
   {
     auto y = BUCKET_INDEX(key_hash);
     Bucket<K, V> *target = bucket + y;
@@ -1197,7 +1197,7 @@ namespace extendible
   }
 
   template <class K, class V>
-  Table<K, V> *Table<K, V>::Split(size_t _key_hash)
+  extendible::Table<K, V> *extendible::Table<K, V>::Split(size_t _key_hash)
   {
     size_t new_pattern = (pattern << 1) + 1;
     size_t old_pattern = pattern << 1;
@@ -1207,10 +1207,10 @@ namespace extendible
       (bucket + i)->get_lock();
     }
     state = -2; /*means the start of the split process*/
-    Table<K, V>::New(&next, local_depth + 1, next);
+    extendible::Table<K, V>::New(&next, local_depth + 1, next);
     // Table<K,V> *next_table = reinterpret_cast<Table<K,V>
     // *>(pmemobj_direct(next));
-    Table<K, V> *next_table = next;
+    extendible::Table<K, V> *next_table = next;
 
     next_table->state = -2;
     next_table->bucket
@@ -1309,7 +1309,7 @@ namespace extendible
   }
 
   template <class K, class V>
-  void Table<K, V>::Merge(Table<K, V> *neighbor, bool unique_check_flag)
+  void extendible::Table<K, V>::Merge(extendible::Table<K, V> *neighbor, bool unique_check_flag)
   {
     /*Restore the split/merge procedure*/
     if (unique_check_flag)
@@ -1433,11 +1433,11 @@ namespace extendible
     inline bool Get(K, V *);
     bool Get(K key, V *, bool is_in_epoch);
     void TryMerge(uint64_t);
-    void Directory_Doubling(int x, Table<K, V> *new_b, Table<K, V> *old_b);
+    void Directory_Doubling(int x, extendible::Table<K, V> *new_b, extendible::Table<K, V> *old_b);
     void Directory_Merge_Update(Directory<K, V> *_sa, uint64_t key_hash,
-                                Table<K, V> *left_seg);
-    void Directory_Update(Directory<K, V> *_sa, int x, Table<K, V> *new_b,
-                          Table<K, V> *old_b);
+                                extendible::Table<K, V> *left_seg);
+    void Directory_Update(Directory<K, V> *_sa, int x, extendible::Table<K, V> *new_b,
+                          extendible::Table<K, V> *old_b);
     void Halve_Directory();
     void Lock_Directory();
     void Unlock_Directory();
@@ -1450,14 +1450,14 @@ namespace extendible
       size_t _count = 0;
       size_t seg_count = 0;
       Directory<K, V> *seg = dir;
-      Table<K, V> **dir_entry = seg->_;
-      Table<K, V> *ss;
+      extendible::Table<K, V> **dir_entry = seg->_;
+      extendible::Table<K, V> *ss;
       auto global_depth = seg->global_depth;
       size_t depth_diff;
       int capacity = pow(2, global_depth);
       for (int i = 0; i < capacity;)
       {
-        ss = reinterpret_cast<Table<K, V> *>(
+        ss = reinterpret_cast<extendible::Table<K, V> *>(
             reinterpret_cast<uint64_t>(dir_entry[i]) & tailMask);
         depth_diff = global_depth - ss->local_depth;
         _count += ss->number;
@@ -1465,7 +1465,7 @@ namespace extendible
         i += pow(2, depth_diff);
       }
 
-      ss = reinterpret_cast<Table<K, V> *>(
+      ss = reinterpret_cast<extendible::Table<K, V> *>(
           reinterpret_cast<uint64_t>(dir_entry[0]) & tailMask);
       uint64_t verify_seg_count = 1;
       while (ss->next != NULL)
@@ -1482,7 +1482,7 @@ namespace extendible
                        (seg_count * kNumPairPerBucket * (kNumBucket + 2))
                 << std::endl;
       std::cout << "Raw_Space: ",
-          (double)(_count * 16) / (seg_count * sizeof(Table<K, V>)) << std::endl;
+          (double)(_count * 16) / (seg_count * sizeof(extendible::Table<K, V>)) << std::endl;
 #endif
     }
 
@@ -1521,13 +1521,13 @@ namespace extendible
     clean = false;
 
     /*FIXME: make the process of initialization crash consistent*/
-    Table<K, V>::New(&dir->_[initCap - 1], dir->global_depth, NULL);
+    extendible::Table<K, V>::New(&dir->_[initCap - 1], dir->global_depth, NULL);
     dir->_[initCap - 1]->pattern = initCap - 1;
     dir->_[initCap - 1]->state = 0;
     /* Initilize the Directory*/
     for (int i = initCap - 2; i >= 0; --i)
     {
-      Table<K, V>::New(&dir->_[i], dir->global_depth, dir->_[i + 1]);
+      extendible::Table<K, V>::New(&dir->_[i], dir->global_depth, dir->_[i + 1]);
       dir->_[i]->pattern = i;
       dir->_[i]->state = 0;
     }
@@ -1600,10 +1600,10 @@ namespace extendible
   }
 
   template <class K, class V>
-  void Finger_EH<K, V>::Directory_Doubling(int x, Table<K, V> *new_b,
-                                           Table<K, V> *old_b)
+  void Finger_EH<K, V>::Directory_Doubling(int x, extendible::Table<K, V> *new_b,
+                                           extendible::Table<K, V> *old_b)
   {
-    Table<K, V> **d = dir->_;
+    extendible::Table<K, V> **d = dir->_;
     auto global_depth = dir->global_depth;
     auto capacity = pow(2, global_depth);
     Directory<K, V>::New(&back_dir, 2 * capacity, dir->version + 1);
@@ -1615,7 +1615,7 @@ namespace extendible
       dd[2 * i] = d[i];
       dd[2 * i + 1] = d[i];
     }
-    dd[2 * x + 1] = reinterpret_cast<Table<K, V> *>(
+    dd[2 * x + 1] = reinterpret_cast<extendible::Table<K, V> *>(
         reinterpret_cast<uint64_t>(new_b) | crash_version);
     new_sa->depth_count = 2;
 
@@ -1627,22 +1627,22 @@ namespace extendible
 
   template <class K, class V>
   void Finger_EH<K, V>::Directory_Update(Directory<K, V> *_sa, int x,
-                                         Table<K, V> *new_b, Table<K, V> *old_b)
+                                         extendible::Table<K, V> *new_b, extendible::Table<K, V> *old_b)
   {
-    Table<K, V> **dir_entry = _sa->_;
+    extendible::Table<K, V> **dir_entry = _sa->_;
     auto global_depth = _sa->global_depth;
     unsigned depth_diff = global_depth - new_b->local_depth;
     if (depth_diff == 0)
     {
       if (x % 2 == 0)
       {
-        dir_entry[x + 1] = reinterpret_cast<Table<K, V> *>(
+        dir_entry[x + 1] = reinterpret_cast<extendible::Table<K, V> *>(
             reinterpret_cast<uint64_t>(new_b) | crash_version);
         old_b->local_depth += 1;
       }
       else
       {
-        dir_entry[x] = reinterpret_cast<Table<K, V> *>(
+        dir_entry[x] = reinterpret_cast<extendible::Table<K, V> *>(
             reinterpret_cast<uint64_t>(new_b) | crash_version);
         old_b->local_depth += 1;
       }
@@ -1657,7 +1657,7 @@ namespace extendible
       int base = chunk_size / 2;
       for (int i = base - 1; i >= 0; --i)
       {
-        dir_entry[x + base + i] = reinterpret_cast<Table<K, V> *>(
+        dir_entry[x + base + i] = reinterpret_cast<extendible::Table<K, V> *>(
             reinterpret_cast<uint64_t>(new_b) | crash_version);
       }
       old_b->local_depth += 1;
@@ -1668,9 +1668,9 @@ namespace extendible
   template <class K, class V>
   void Finger_EH<K, V>::Directory_Merge_Update(Directory<K, V> *_sa,
                                                uint64_t key_hash,
-                                               Table<K, V> *left_seg)
+                                               extendible::Table<K, V> *left_seg)
   {
-    Table<K, V> **dir_entry = _sa->_;
+    extendible::Table<K, V> **dir_entry = _sa->_;
     auto global_depth = _sa->global_depth;
     auto x = (key_hash >> (8 * sizeof(key_hash) - global_depth));
     uint64_t chunk_size = pow(2, global_depth - (left_seg->local_depth));
@@ -1718,7 +1718,7 @@ namespace extendible
     auto old_sa = dir;
     auto x = (key_hash >> (8 * sizeof(key_hash) - old_sa->global_depth));
     auto dir_entry = old_sa->_;
-    Table<K, V> *target = reinterpret_cast<Table<K, V> *>(
+    extendible::Table<K, V> *target = reinterpret_cast<extendible::Table<K, V> *>(
         reinterpret_cast<uint64_t>(dir_entry[x]) & tailMask);
 
     auto ret = target->Insert(key, value, key_hash, meta_hash, &dir);
@@ -1739,7 +1739,7 @@ namespace extendible
       /*verify procedure*/
       auto old_sa = dir;
       auto x = (key_hash >> (8 * sizeof(key_hash) - old_sa->global_depth));
-      if (reinterpret_cast<Table<K, V> *>(
+      if (reinterpret_cast<extendible::Table<K, V> *>(
               reinterpret_cast<uint64_t>(old_sa->_[x]) & tailMask) !=
           target) /* verify process*/
       {
@@ -1830,7 +1830,7 @@ namespace extendible
     auto y = BUCKET_INDEX(key_hash);
     auto dir_entry = old_sa->_;
     auto old_entry = dir_entry[x];
-    Table<K, V> *target = reinterpret_cast<Table<K, V> *>(
+    extendible::Table<K, V> *target = reinterpret_cast<extendible::Table<K, V> *>(
         reinterpret_cast<uint64_t>(old_entry) & tailMask);
 
     Bucket<K, V> *target_bucket = target->bucket + y;
@@ -1980,7 +1980,7 @@ namespace extendible
     auto y = BUCKET_INDEX(key_hash);
     auto dir_entry = old_sa->_;
     auto old_entry = dir_entry[x];
-    Table<K, V> *target = reinterpret_cast<Table<K, V> *>(
+    extendible::Table<K, V> *target = reinterpret_cast<extendible::Table<K, V> *>(
         reinterpret_cast<uint64_t>(old_entry) & tailMask);
 
     Bucket<K, V> *target_bucket = target->bucket + y;
@@ -2247,7 +2247,7 @@ namespace extendible
     auto old_sa = dir;
     auto x = (key_hash >> (8 * sizeof(key_hash) - old_sa->global_depth));
     auto dir_entry = old_sa->_;
-    Table<K, V> *target_table = reinterpret_cast<Table<K, V> *>(
+    extendible::Table<K, V> *target_table = reinterpret_cast<extendible::Table<K, V> *>(
         reinterpret_cast<uint64_t>(dir_entry[x]) & tailMask);
 
     /*we need to first do the locking and then do the verify*/
@@ -2263,8 +2263,8 @@ namespace extendible
 
     old_sa = dir;
     x = (key_hash >> (8 * sizeof(key_hash) - old_sa->global_depth));
-    if (reinterpret_cast<Table<K, V> *>(reinterpret_cast<uint64_t>(old_sa->_[x]) &
-                                        tailMask) != target_table)
+    if (reinterpret_cast<extendible::Table<K, V> *>(reinterpret_cast<uint64_t>(old_sa->_[x]) &
+                                                    tailMask) != target_table)
     {
       target->release_lock();
       neighbor->release_lock();
@@ -2411,8 +2411,8 @@ namespace extendible
     size_t _count = 0;
     size_t seg_count = 0;
     Directory<K, V> *seg = dir;
-    Table<K, V> **dir_entry = seg->_;
-    Table<K, V> *ss;
+    extendible::Table<K, V> **dir_entry = seg->_;
+    extendible::Table<K, V> *ss;
     auto global_depth = seg->global_depth;
     size_t depth_diff;
     int capacity = pow(2, global_depth);

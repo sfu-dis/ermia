@@ -309,10 +309,10 @@ namespace ermia
   bool ConcurrentDashIndex::InsertIfAbsent(transaction *t, const varstr &key,
                                            OID oid)
   {
-    bool found = dash_->Get(key, oid, false);
+    bool found = dash_->Get(key, &oid, false);
     if (found)
       return false;
-    bool inserted = dash_.Insert(key, oid, false);
+    bool inserted = dash_->Insert(key, oid, false);
     return inserted;
   }
   bool ConcurrentMasstreeIndex::InsertIfAbsent(transaction *t, const varstr &key,

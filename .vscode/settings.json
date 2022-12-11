@@ -2,6 +2,7 @@
     "files.associations": {
         "type_traits": "cpp",
         "charconv": "cpp",
-        "algorithm": "cpp"
+        "algorithm": "cpp",
+        "xlocale": "c"
     }
 }
