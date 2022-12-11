@@ -51,15 +51,12 @@ namespace extendible
   const uint64_t headerMask = ((1UL << 8) - 1) << 56;
   const uint8_t overflowBitmapMask = (1 << 4) - 1;
 
-  constexpr size_t k_PairSize = 16; // a k-v _Pair with a bit
-  constexpr size_t kNumPairPerBucket =
-      14; /* it is determined by the usage of the fingerprint*/
+  constexpr size_t k_PairSize = 16;        // a k-v _Pair with a bit
+  constexpr size_t kNumPairPerBucket = 14; /* it is determined by the usage of the fingerprint*/
   constexpr size_t kFingerBits = 8;
   constexpr size_t kMask = (1 << kFingerBits) - 1;
-  const constexpr size_t kNumBucket =
-      64; /* the number of normal buckets in one segment*/
-  constexpr size_t stashBucket =
-      2; /* the number of stash buckets in one segment*/
+  const constexpr size_t kNumBucket = 64; /* the number of normal buckets in one segment*/
+  constexpr size_t stashBucket = 2;       /* the number of stash buckets in one segment*/
   constexpr int allocMask = (1 << kNumPairPerBucket) - 1;
   constexpr size_t bucketMask = ((1 << (int)log2(kNumBucket)) - 1);
   constexpr size_t stashMask = (1 << (int)log2(stashBucket)) - 1;
@@ -736,7 +733,7 @@ namespace extendible
                                uint8_t meta_hash); /*with uniqueness check*/
     void Insert4merge(K key, V value, size_t key_hash, uint8_t meta_hash,
                       bool flag = false);
-    extendible::Table<K, V> *Split(Finger_EH<K, V> *ht, size_t);
+    Table<K, V> Split(Finger_EH<K, V> *ht, size_t);
     void Merge(extendible::Table<K, V> *, bool flag = false);
     int Delete(K key, size_t key_hash, uint8_t meta_hash, Directory<K, V> **_dir);
 
@@ -1197,7 +1194,7 @@ namespace extendible
   }
 
   template <class K, class V>
-  extendible::Table<K, V> *extendible::Table<K, V>::Split(size_t _key_hash)
+  Table<K, V> Table<K, V>::Split(size_t _key_hash)
   {
     size_t new_pattern = (pattern << 1) + 1;
     size_t old_pattern = pattern << 1;
@@ -1965,7 +1962,7 @@ namespace extendible
   bool Finger_EH<K, V>::Get(K key, V *value)
   {
     uint64_t key_hash;
-    if constexpr (std::is_pointer_v<K>)
+    if constexpr (std::is_pointer<K>)
     {
       key_hash = h(key->key, key->length);
     }

@@ -203,9 +203,9 @@ namespace ermia
     // inline size_t Size() override { return dash_.size(); }
     // std::map<std::string, uint64_t> Clear() override;
     // inline void SetArrays() override { dash_.set_arrays(descriptor_); }
-    inline void GetOID(const varstr &key, rc_t &rc, OID &out_oid) override
+    inline void GetOID(const varstr &key, rc_t &rc, OID &out_oid)
     {
-      bool found = dash_->Get(key, &out_oid, false);
+      bool found = ((extendible::Finger_EH<OID, varstr> *)dash_)->Get(key, &out_oid, false);
       volatile_write(rc._val, found ? RC_TRUE : RC_FALSE);
     }
 
